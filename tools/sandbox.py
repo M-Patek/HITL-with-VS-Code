@@ -23,7 +23,9 @@ class DockerSandbox:
             self.client = None
 
         self.image = image
-        self.container_name = "swarm_sandbox_runner"
+        # [Critical Fix] 并发灾难修复：使用动态生成的 UUID 作为容器名
+        # 防止多个任务同时运行时抢占同一个容器
+        self.container_name = f"swarm_sandbox_{uuid.uuid4().hex[:8]}"
         self.container = None
 
     def run_code(self, code: str, timeout: int = 30) -> Tuple[str, str, List[Dict[str, str]]]:
@@ -36,22 +38,18 @@ class DockerSandbox:
             )
 
         try:
-            # [Optimization] 懒加载容器，处理容器复用
-            try:
-                self.container = self.client.containers.get(self.container_name)
-                if self.container.status != "running":
-                    self.container.start()
-            except docker.errors.NotFound:
-                self.container = self.client.containers.run(
-                    self.image,
-                    detach=True,
-                    tty=True,
-                    name=self.container_name,
-                    mem_limit="512m",
-                    network_mode="none" 
-                )
+            # 启动容器
+            # [Optimization] 增加 auto_remove=False 以便我们在提取文件后再手动删除
+            # 使用 network_mode='none' 隔离网络
+            self.container = self.client.containers.run(
+                self.image,
+                detach=True,
+                tty=True,
+                name=self.container_name,
+                mem_limit="512m",
+                network_mode="none" 
+            )
             
-            # [Optimization] 使用 UUID 避免并发文件冲突
             run_id = str(uuid.uuid4())[:8]
             script_filename = f"script_{run_id}.py"
             plot_filename = f"plot_{run_id}.png"
@@ -76,13 +74,17 @@ class DockerSandbox:
             # 提取图片
             images = self._extract_image_from_container(container_plot_path)
             
-            # 可选：清理临时文件
-            # self.container.exec_run(f"rm /tmp/{script_filename} {container_plot_path}")
-
             return stdout, stderr, images
             
         except Exception as e:
             return "", f"System Error: {str(e)}", []
+        finally:
+            # [Optimization] 确保容器被清理，防止资源泄漏
+            if self.container:
+                try:
+                    self.container.remove(force=True)
+                except:
+                    pass
 
     def _write_file_to_container(self, dest_dir: str, filename: str, content: str):
         tar_stream = io.BytesIO()
@@ -98,25 +100,29 @@ class DockerSandbox:
     def _extract_image_from_container(self, filepath: str) -> List[Dict[str, str]]:
         images = []
         try:
+            # 使用 get_archive 获取文件流
             stream, stat = self.container.get_archive(filepath)
             file_obj = io.BytesIO()
             for chunk in stream:
                 file_obj.write(chunk)
             file_obj.seek(0)
             with tarfile.open(fileobj=file_obj, mode='r') as tar:
-                member_name = os.path.basename(filepath)
+                # 获取 tar 包中的文件名（可能不带路径）
                 for m in tar.getmembers():
-                    if m.name.endswith(member_name):
+                    if m.isfile(): # 只要是文件就提取
                         img_data = tar.extractfile(m).read()
                         b64_img = base64.b64encode(img_data).decode('utf-8')
-                        images.append({"type": "image", "filename": member_name, "data": f"data:image/png;base64,{b64_img}"})
-                        break
-        except: pass
+                        images.append({"type": "image", "filename": m.name, "data": f"data:image/png;base64,{b64_img}"})
+        except Exception as e:
+            # [Fix] 吞没异常会导致图片丢失且无法排查，至少记录日志
+            logger.error(f"Image extraction failed: {e}")
+            pass
         return images
 
     def _wrap_code_with_plot_saving(self, code: str, save_path: str) -> str:
-        if "matplotlib" in code or "plt." in code:
-            # 动态插入保存路径
+        # [Fix] 只有在确实导入了 matplotlib 时才注入代码
+        # 简单的字符串检查可能误判，这里稍微严格一点，但仍然保持简单
+        if "import matplotlib" in code or "from matplotlib" in code:
             header = f"import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
             footer = f"\ntry:\n    if plt.get_fignums():\n        plt.savefig('{save_path}')\nexcept: pass"
             return header + code + footer
