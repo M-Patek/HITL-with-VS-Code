@@ -5,11 +5,8 @@ from core.rotator import GeminiKeyRotator
 from tools.memory import VectorMemoryTool
 from tools.search import GoogleSearchTool
 
-# [Cleanup] 直接导入构建函数，不再使用 core.crew_registry
 from agents.crews.coding_crew.graph import build_coding_crew_graph
 
-# [Cleanup] 定义统一的 State 类型，这里直接复用 CodingCrewState 作为主 State
-# 如果未来有多个 Crew，可以使用 Union 或更通用的 AgentGraphState
 AgentGraphState = CodingCrewState 
 
 def build_agent_workflow(
@@ -20,15 +17,14 @@ def build_agent_workflow(
 ):
     """
     构建主工作流 - VS Code Direct Mode
-    完全移除了旧的注册表逻辑，直接动态构建 Coding Crew。
     """
     # 1. 初始化主图
     workflow = StateGraph(AgentGraphState)
     
-    # 2. 动态构建 Coding Crew 子图，注入真实的 Rotator
-    # 这样 Agents 才能使用 api_server.py 中配置的真实 Keys
-    print("🔄 Building Coding Crew with LIVE Rotator...")
-    coding_subgraph = build_coding_crew_graph(rotator)
+    # 2. 动态构建 Coding Crew 子图，注入所有工具
+    print("🔄 Building Coding Crew with LIVE Rotator & Tools...")
+    # [Fix] Pass memory and search tools
+    coding_subgraph = build_coding_crew_graph(rotator, memory=memory, search=search)
     
     # 3. 添加节点：直接作为主处理单元
     print("🚀 Wiring Workflow: Start -> Coding Crew -> End")
