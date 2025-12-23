@@ -1,8 +1,7 @@
 import re
 import json
 import os
-import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from core.utils import load_prompt, calculate_cost
 from core.models import GeminiModel, ProjectState
@@ -19,18 +18,15 @@ class CodingCrewNodes:
         self.base_prompt_path = os.path.join(os.path.dirname(__file__), "prompts")
 
     def _get_project_state(self, state: CodingCrewState) -> ProjectState:
-        """Helper to safely extract ProjectState"""
         return state.get("project_state")
 
     def _ensure_repo_map(self, ps: ProjectState):
-        """[Aider] Lazy load Repo Map"""
         if not ps.repo_map and ps.workspace_root:
             print(f"🗺️ [RepoMap] Analyzing workspace: {ps.workspace_root}")
             mapper = RepositoryMapper(ps.workspace_root)
             ps.repo_map = mapper.generate_map()
 
     def _update_cost(self, ps: ProjectState, usage: Dict[str, int]):
-        """[Roo Code] Track Costs"""
         if not usage: return
         in_tokens = usage.get("prompt_tokens", 0)
         out_tokens = usage.get("completion_tokens", 0)
@@ -44,60 +40,35 @@ class CodingCrewNodes:
         print(f"   💰 Cost: ${cost:.6f} | Total: ${ps.cost_stats.total_cost:.4f}")
 
     def coder_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """
-        [Coder] VS Code Aware + Repo Map + MCP Tools + Cost Tracking
-        """
+        """[Coder] with Conversational Memory"""
         ps = self._get_project_state(state)
         iteration = state.get("iteration_count", 0) + 1
         
         print(f"\n💻 [Coder] VS Code Engine Activated (Iter: {iteration})")
         
-        # 1. Ensure Map
         self._ensure_repo_map(ps)
-        
-        # 2. Load Prompt
         prompt_template = load_prompt(self.base_prompt_path, "coder.md")
         
-        # 3. Build File Context
+        # Build Context
         user_input = ps.user_input
         file_ctx_str = "No file open."
-        
         if ps.file_context:
             fc = ps.file_context
             content = fc.content
-            # Smart Truncation
             if len(content) > 10000:
-                content = content[:10000] + "\n...[Content Truncated due to length]..."
-            
-            file_ctx_str = f"""
-### 📄 Current File Context (Focus)
-- **Filename**: `{fc.filename}`
-- **Language**: `{fc.language_id}`
-- **Cursor Line**: {fc.cursor_line}
-- **Selection**:
-```
-{fc.selection or "(No selection)"}
-```
-- **Content**:
-```
-{content}
-```
-"""
+                content = content[:10000] + "\n...[Content Truncated]..."
+            file_ctx_str = f"Filename: {fc.filename}\nLang: {fc.language_id}\nContent:\n{content}"
         
-        # 4. Build Repo Map Context
-        repo_map_str = ps.repo_map if ps.repo_map else "(No Repository Map available)"
-
-        # 5. Build Feedback Context
+        repo_map_str = ps.repo_map if ps.repo_map else "(No Map)"
+        
         reflection = state.get("reflection", "")
         raw_feedback = state.get("review_feedback", "")
         combined_feedback = raw_feedback
         if reflection:
              combined_feedback = f"### Tech Lead Fix Strategy:\n{reflection}\n\nReview Feedback: {raw_feedback}"
         
-        # 6. Build MCP Instructions
         mcp_instructions = MCPToolRegistry.get_system_prompt_addition()
 
-        # 7. Format Prompt
         formatted_prompt = prompt_template.format(
             user_input=user_input,
             file_context=file_ctx_str,
@@ -106,24 +77,35 @@ class CodingCrewNodes:
             mcp_tools=mcp_instructions
         )
         
-        # 8. Call LLM
+        # [Memory Fix] Inject Chat History
+        contents = []
+        # Add history messages
+        if ps.full_chat_history:
+            for msg in ps.full_chat_history:
+                # Convert our internal format to Gemini format
+                role = "user" if msg['role'] == 'user' else "model"
+                contents.append({"role": role, "parts": [{"text": msg['content']}]})
+        
+        # Add current prompt
+        contents.append({"role": "user", "parts": [{"text": formatted_prompt}]})
+        
         response_text, usage = self.rotator.call_gemini_with_rotation(
             model_name=GEMINI_MODEL_NAME,
-            contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
-            system_instruction="You are a VS Code AI Copilot. Use MCP tools to edit files. Think step-by-step.",
+            contents=contents,
+            system_instruction="You are a VS Code AI Copilot. Use MCP tools. Think step-by-step.",
             complexity="complex"
         )
         
-        # 9. Track Cost
         self._update_cost(ps, usage)
-        
         code = response_text or ""
         
-        # 10. Parse Tool Call (Roo Code)
+        # [Memory Update]
+        ps.full_chat_history.append({"role": "user", "content": user_input}) # Simplified, better to add prompt
+        ps.full_chat_history.append({"role": "ai", "content": code})
+
         tool_call = MCPToolRegistry.parse_tool_call(response_text)
         
         if not tool_call:
-            # Fallback to legacy markdown code block parsing
             match = re.search(r"```python(.*?)```", response_text, re.DOTALL)
             if match:
                 code = match.group(1).strip()
@@ -132,7 +114,7 @@ class CodingCrewNodes:
                  if match: code = match.group(1).strip()
             ps.code_blocks["coder"] = code
         else:
-            ps.code_blocks["coder"] = response_text # Keep full thought process
+            ps.code_blocks["coder"] = response_text 
             ps.artifacts["pending_tool_call"] = tool_call
 
         return {
@@ -143,14 +125,12 @@ class CodingCrewNodes:
         }
 
     async def executor_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Executor] Sandbox Runner (Stateful)"""
+        """[Executor] Sandbox Runner"""
         ps = self._get_project_state(state)
         task_id = ps.task_id
         
-        # 1. Check for MCP Tool Call (Client Side Execution)
         if "pending_tool_call" in ps.artifacts:
-            print("   🛠️ Tool Call detected, waiting for Client Approval...")
-            # We don't execute here, we wait for frontend
+            print("   🛠️ Tool Call detected, waiting for Client...")
             return {
                 "project_state": ps,
                 "execution_stdout": "[Waiting for Client Tool Execution]",
@@ -158,51 +138,41 @@ class CodingCrewNodes:
                 "execution_passed": True 
             }
         
-        # 2. Python Code Block Execution (Server Side Sandbox)
-        print(f"🚀 [Executor] Sandbox Running for Task {task_id}...")
+        print(f"🚀 [Executor] Sandbox Running...")
         code = state.get("generated_code", "")
         
         if not code:
             return {"execution_passed": False, "execution_stderr": "No code."}
             
         sandbox = get_sandbox(task_id)
-        
         if sandbox:
             stdout, stderr, images = sandbox.execute_code(code)
-            
             passed = (not stderr or "Error" not in stderr)
-            status_icon = "✅" if passed else "❌"
-            print(f"   {status_icon} Sandbox Executed.")
-            
-            if images:
-                 ps.artifacts["image_artifacts"] = images
+            if images: ps.artifacts["image_artifacts"] = images
 
             return {
                 "project_state": ps,
                 "execution_stdout": stdout,
                 "execution_stderr": stderr,
-                "execution_passed": passed,
-                "image_artifacts": images
+                "execution_passed": passed
             }
         else:
             return {"execution_passed": False, "execution_stderr": "Sandbox not found."}
 
     def reviewer_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Reviewer] Code Review + Cost Tracking"""
-        print(f"🧐 [Reviewer] Analyzing...")
+        """[Functional Reviewer]"""
+        print(f"🧐 [Functional Reviewer] Analyzing logic...")
         ps = self._get_project_state(state)
         
         stdout = state.get("execution_stdout", "")
         stderr = state.get("execution_stderr", "")
-        if len(stdout) > 2000: stdout = stdout[:2000] + "...(truncated)"
-        if len(stderr) > 2000: stderr = stderr[:2000] + "...(truncated)"
 
         prompt_template = load_prompt(self.base_prompt_path, "reviewer.md")
         formatted_prompt = prompt_template.format(
             user_input=ps.user_input,
             code=state.get("generated_code", ""),
-            stdout=stdout,
-            stderr=stderr
+            stdout=stdout[:2000],
+            stderr=stderr[:2000]
         )
         
         response_text, usage = self.rotator.call_gemini_with_rotation(
@@ -219,37 +189,83 @@ class CodingCrewNodes:
         try:
             start = response_text.find("{")
             end = response_text.rfind("}")
-            if start != -1 and end != -1:
+            if start != -1:
                 json_str = response_text[start:end+1]
-                json_str = json_str.replace("```json", "").replace("```", "")
                 report = json.loads(json_str)
                 status = report.get("status", "reject").lower()
                 feedback = report.get("feedback", "")
-        except Exception as e:
-            print(f"   ⚠️ Review JSON Parse Failed: {e}")
-            pass
+        except: pass
         
-        print(f"   📝 Review Status: {status.upper()}")
         return {
-            "review_status": status,
-            "review_feedback": feedback,
-            "review_report": report
+            "functional_status": status,
+            "functional_feedback": feedback
+        }
+
+    def security_node(self, state: CodingCrewState) -> Dict[str, Any]:
+        """[Security Audit] Parallel Node"""
+        print(f"🛡️ [Security Guard] Auditing safety...")
+        ps = self._get_project_state(state)
+        
+        code = state.get("generated_code", "")
+        # Simple Security Prompt
+        prompt = f"""
+        Role: Security Auditor
+        Task: Analyze the following code for security vulnerabilities (RCE, XSS, SQL Injection, Path Traversal).
+        Code:
+        {code}
+        
+        Output JSON: {{ "safe": boolean, "issues": "string" }}
+        """
+        
+        response_text, usage = self.rotator.call_gemini_with_rotation(
+            model_name=GEMINI_MODEL_NAME,
+            contents=[{"role": "user", "parts": [{"text": prompt}]}],
+            complexity="simple"
+        )
+        self._update_cost(ps, usage)
+        
+        issues = "No issues."
+        try:
+            start = response_text.find("{")
+            end = response_text.rfind("}")
+            if start != -1:
+                data = json.loads(response_text[start:end+1])
+                if not data.get("safe", True):
+                    issues = f"🚨 VULNERABILITY: {data.get('issues')}"
+        except: pass
+        
+        return {"security_feedback": issues}
+
+    def aggregator_node(self, state: CodingCrewState) -> Dict[str, Any]:
+        """[Aggregator] Merging Reviews"""
+        print(f"📊 [Aggregator] Merging insights...")
+        
+        func_status = state.get("functional_status", "reject")
+        func_feedback = state.get("functional_feedback", "")
+        sec_feedback = state.get("security_feedback", "")
+        
+        final_status = func_status
+        combined_feedback = f"Functional: {func_feedback}\n\nSecurity: {sec_feedback}"
+        
+        if "VULNERABILITY" in sec_feedback:
+            final_status = "reject"
+        
+        return {
+            "review_status": final_status,
+            "review_feedback": combined_feedback
         }
 
     def reflector_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Reflector] Root Cause Analysis + Cost Tracking"""
+        """[Reflector]"""
         print(f"🔧 [Reflector] Fixing strategy...")
         ps = self._get_project_state(state)
         
-        stderr = state.get("execution_stderr", "None")
-        if len(stderr) > 2000: stderr = stderr[:2000] + "...(truncated)"
-
         prompt_template = load_prompt(self.base_prompt_path, "reflection.md")
         formatted_prompt = prompt_template.format(
             user_input=ps.user_input,
             code=state.get("generated_code", ""),
-            execution_stderr=stderr,
-            review_report=json.dumps(state.get("review_report", {}))
+            execution_stderr=state.get("execution_stderr", "")[:2000],
+            review_report=state.get("review_feedback", "")
         )
         
         response_text, usage = self.rotator.call_gemini_with_rotation(
@@ -263,7 +279,7 @@ class CodingCrewNodes:
         return {"reflection": response_text}
 
     def summarizer_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Summarizer] Final Report + Cost Tracking"""
+        """[Summarizer]"""
         print(f"📝 [Summarizer] Finalizing...")
         ps = self._get_project_state(state)
         
@@ -277,7 +293,6 @@ class CodingCrewNodes:
         response_text, usage = self.rotator.call_gemini_with_rotation(
             model_name=GEMINI_MODEL_NAME,
             contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
-            system_instruction="Summary.",
             complexity="simple"
         )
         self._update_cost(ps, usage)
