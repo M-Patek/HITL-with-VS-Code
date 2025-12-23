@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { GitManager } from './gitManager';
 
-export class ActionManager {
+export class ActionManager implements vscode.Disposable {
     private static _instance: ActionManager;
     private static _terminal: vscode.Terminal | undefined;
     private _gitManager: GitManager;
@@ -18,6 +18,14 @@ export class ActionManager {
             ActionManager._instance = new ActionManager();
         }
         return ActionManager._instance;
+    }
+
+    public dispose() {
+        if (ActionManager._terminal) {
+            ActionManager._terminal.dispose();
+            ActionManager._terminal = undefined;
+        }
+        this._gitManager.dispose();
     }
 
     private async ensureCheckpoint(context: string) {
@@ -82,13 +90,21 @@ export class ActionManager {
     }
 
     public async runInTerminal(command: string) {
-        const selection = await vscode.window.showWarningMessage(
-            `Gemini Swarm wants to run: "${command}". Allow?`,
-            { modal: true },
-            "Run", "Cancel"
-        );
+        const header = "⚠️ GEMINI SWARM SECURITY CHECK ⚠️\n\nThe AI wants to execute the following command in your terminal.\nPlease review it CAREFULLY before approving.\n\nCOMMAND:\n";
+        const docContent = header + "-".repeat(50) + "\n" + command + "\n" + "-".repeat(50);
+        
+        const doc = await vscode.workspace.openTextDocument({ content: docContent, language: 'shellscript' });
+        await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Beside });
 
-        if (selection !== "Run") return;
+        const selection = await vscode.window.showWarningMessage(
+            `Review the command in the editor. Allow execution?`,
+            { modal: true },
+            "✅ Execute", "🚫 Cancel"
+        );
+        
+        vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+
+        if (selection !== "✅ Execute") return;
 
         if (!ActionManager._terminal || ActionManager._terminal.exitStatus !== undefined) {
             ActionManager._terminal = vscode.window.createTerminal({
@@ -114,32 +130,25 @@ export class ActionManager {
                     const backupPath = `${fullPath}.bak`;
                     await fs.promises.copyFile(fullPath, backupPath);
                 }
-            } catch (e) {
-                console.warn("Failed to create backup", e);
+            } catch (e: any) {
+                const msg = `❌ Backup failed for ${relativePath}: ${e.message}. Operation aborted for safety.`;
+                vscode.window.showErrorMessage(msg);
+                throw new Error(msg);
             }
         }
 
         try {
             const dir = path.dirname(fullPath);
             await fs.promises.mkdir(dir, { recursive: true });
-            
             await fs.promises.writeFile(fullPath, content, 'utf8');
-            
             vscode.window.showInformationMessage(`✅ File updated: ${relativePath}`);
-            
-            try {
-                const doc = await vscode.workspace.openTextDocument(fullPath);
-                await vscode.window.showTextDocument(doc);
-            } catch {}
-            
         } catch (e: any) {
             vscode.window.showErrorMessage(`❌ Failed to write file: ${e.message}`);
         }
     }
 
     /**
-     * [Phase 2 Upgrade] Smart Diff Application
-     * Applies search_block / replace_block with fuzzy matching (ignoring whitespace).
+     * [Robustness Fix] Fuzzy Match Diff Application
      */
     public async applySmartDiff(relativePath: string, searchBlock: string, replaceBlock: string) {
         const fullPath = this.validatePath(relativePath);
@@ -147,110 +156,77 @@ export class ActionManager {
 
         try {
             if (!fs.existsSync(fullPath)) {
-                vscode.window.showErrorMessage(`❌ Apply Diff Failed: File not found ${relativePath}`);
+                vscode.window.showErrorMessage(`❌ Diff failed: File not found ${relativePath}`);
                 return;
             }
 
-            const originalContent = await fs.promises.readFile(fullPath, 'utf8');
-            
-            // 1. Try Exact Match First
-            if (originalContent.includes(searchBlock)) {
-                const newContent = originalContent.replace(searchBlock, replaceBlock);
-                await this.applyFileChange(relativePath, newContent);
-                return;
-            }
-
-            // 2. Fuzzy Match (Line by Line, ignore whitespace)
-            // This is a simplified implementation of Aider's diff logic
-            const lines = originalContent.split(/\r?\n/);
-            const searchLines = searchBlock.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+            const fileContent = await fs.promises.readFile(fullPath, 'utf8');
+            const fileLines = fileContent.split(/\r?\n/);
+            const searchLines = searchBlock.split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
             
             if (searchLines.length === 0) {
-                 vscode.window.showErrorMessage(`❌ Apply Diff Failed: Empty search block.`);
+                 vscode.window.showErrorMessage("❌ Diff failed: Empty search block.");
                  return;
             }
 
+            // Fuzzy Match Logic: Find index where lines match ignoring leading/trailing whitespace
             let matchIndex = -1;
-            
-            // Sliding window search
-            for (let i = 0; i < lines.length; i++) {
+            for (let i = 0; i <= fileLines.length - searchLines.length; i++) {
                 let match = true;
+                // We need to skip empty lines in original file during matching too? 
+                // Simple approach: Match non-empty lines sequence
+                
+                let fileCursor = i;
                 for (let j = 0; j < searchLines.length; j++) {
-                    if (i + j >= lines.length) {
+                    // Skip empty lines in file
+                    while (fileCursor < fileLines.length && fileLines[fileCursor].trim() === "") {
+                        fileCursor++;
+                    }
+                    
+                    if (fileCursor >= fileLines.length || fileLines[fileCursor].trim() !== searchLines[j]) {
                         match = false;
                         break;
                     }
-                    if (lines[i + j].trim() !== searchLines[j]) {
-                        match = false;
-                        break;
-                    }
+                    fileCursor++;
                 }
+
                 if (match) {
                     matchIndex = i;
                     break;
                 }
             }
 
-            if (matchIndex !== -1) {
-                // Determine the range to replace in original lines
-                // We need to be careful about how many lines we are actually replacing
-                // because we filtered searchLines.
-                
-                // Heuristic: Find the start line in original text that matched searchLines[0]
-                // and end line that matched searchLines[last]
-                
-                // A safer approach for this simple version:
-                // Re-construct the new content by slicing arrays
-                // Note: This replaces the matched lines with replaceBlock directly.
-                // It might lose some indentation of the original block if replaceBlock doesn't have it.
-                // But usually LLM provides indentation in replaceBlock.
-
-                // Calculate the actual number of lines in original file that were covered by the fuzzy match
-                // We need to walk forward from matchIndex until we satisfy all searchLines
-                let originalCoveredCount = 0;
-                let searchPtr = 0;
-                let currentIdx = matchIndex;
-                
-                while (searchPtr < searchLines.length && currentIdx < lines.length) {
-                    if (lines[currentIdx].trim() === searchLines[searchPtr]) {
-                        searchPtr++;
-                    }
-                    originalCoveredCount++;
-                    currentIdx++;
-                }
-
-                const before = lines.slice(0, matchIndex).join('\n');
-                const after = lines.slice(matchIndex + originalCoveredCount).join('\n');
-                const newContent = (before ? before + '\n' : '') + replaceBlock + (after ? '\n' + after : '');
-                
-                await this.applyFileChange(relativePath, newContent);
-                vscode.window.showInformationMessage(`✅ Smart Diff Applied to ${relativePath}`);
-            } else {
-                vscode.window.showErrorMessage(`❌ Apply Diff Failed: Could not locate search block in ${relativePath}`);
-                // Optional: Show diff view of what was expected vs what is there?
+            if (matchIndex === -1) {
+                vscode.window.showErrorMessage(`❌ Diff failed: Could not locate code block in ${relativePath}`);
+                return;
             }
 
+            // Reconstruct content
+            // Need to identify exactly which range in original file covers the search block
+            // including the skipped empty lines.
+            
+            let fileCursor = matchIndex;
+            for (let j = 0; j < searchLines.length; j++) {
+                 while (fileCursor < fileLines.length && fileLines[fileCursor].trim() === "") {
+                    fileCursor++;
+                }
+                fileCursor++; 
+            }
+            // fileCursor is now at the line AFTER the matched block
+
+            const before = fileLines.slice(0, matchIndex).join('\n');
+            const after = fileLines.slice(fileCursor).join('\n');
+            
+            const newContent = (before ? before + '\n' : '') + replaceBlock + (after ? '\n' + after : '');
+
+            await this.applyFileChange(relativePath, newContent);
+            
         } catch (e: any) {
             vscode.window.showErrorMessage(`❌ Diff Error: ${e.message}`);
         }
     }
     
     public async undoLastChange() {
-        if (await this._gitManager.isGitRepo()) {
-            const lastMessage = await this._gitManager.getLastCommitMessage();
-            if (!lastMessage.includes("Gemini Swarm")) {
-                const selection = await vscode.window.showErrorMessage(
-                    `⚠️ Danger: The last commit "${lastMessage.trim()}" does not look like it was made by Gemini Swarm. Are you sure you want to revert it?`,
-                    { modal: true },
-                    "Yes, Force Revert", "Cancel"
-                );
-                
-                if (selection !== "Yes, Force Revert") return;
-            }
-
-            await this._gitManager.undoLastCommit();
-        } else {
-            vscode.window.showErrorMessage("Undo is only available in Git repositories.");
-        }
+        await this._gitManager.undoLastCommit();
     }
 }
