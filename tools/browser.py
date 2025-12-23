@@ -1,120 +1,119 @@
 import requests
-from bs4 import BeautifulSoup
-import logging
 import socket
-from urllib.parse import urlparse
 import ipaddress
-import asyncio
-import base64
+import logging
+from urllib.parse import urlparse, urlunparse
+from typing import Optional
 
-# [Phase 2 Upgrade] Try importing Playwright
+# Optional Playwright support
 try:
     from playwright.async_api import async_playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
-logger = logging.getLogger("Tools-Browser")
+logger = logging.getLogger(__name__)
 
-class WebLoader:
+class BrowserTool:
     """
-    [Continue Soul] 网页内容抓取工具 (@Docs)
-    [Phase 2 Upgrade] 集成 Playwright 用于截图 (Vision)
+    Tool for safe web browsing and scraping.
     """
     def __init__(self):
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            'User-Agent': 'Mozilla/5.0 (GeminiSwarm/1.0; SafeBot)'
         }
 
     def _is_safe_url(self, url: str) -> bool:
         """
-        [Security Fix] SSRF 防御检测
+        [Security] Validates URL to prevent SSRF (Server-Side Request Forgery).
+        Checks if the domain resolves to a private or loopback IP.
         """
         try:
             parsed = urlparse(url)
             hostname = parsed.hostname
-            if not hostname: return False
-
-            # Allow localhost for Phase 2 Screenshot feature
-            if hostname in ["localhost", "127.0.0.1", "0.0.0.0"]:
-                return True
-
-            try:
-                ip = socket.gethostbyname(hostname)
-            except socket.gaierror:
-                return False 
-
-            ip_obj = ipaddress.ip_address(ip)
-            if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local):
-                # For scraping external docs, block private IPs.
-                # But for our screenshot feature, we might need to allow it.
-                # Context-aware check needed. For now, strict for external scraping.
-                return False 
+            if not hostname:
+                return False
                 
-            if parsed.scheme not in ('http', 'https'): return False
+            # Allow http and https only
+            if parsed.scheme not in ('http', 'https'):
+                return False
+
+            # Resolve IP
+            try:
+                ip_list = socket.getaddrinfo(hostname, None)
+                # Check all resolved IPs
+                for item in ip_list:
+                    ip_addr = item[4][0]
+                    ip_obj = ipaddress.ip_address(ip_addr)
+                    if ip_obj.is_private or ip_obj.is_loopback:
+                        logger.warning(f"Blocked access to private IP: {ip_addr} ({hostname})")
+                        return False
+            except socket.gaierror:
+                logger.warning(f"DNS resolution failed for {hostname}")
+                return False
+                
             return True
         except Exception:
             return False
 
     def scrape_url(self, url: str) -> str:
-        """抓取 URL 并转换为简化文本 (同步模式, 用于 RAG)"""
+        """
+        Fetches the content of a URL safely.
+        """
         if not self._is_safe_url(url):
-            return f"[Security Blocked] Access to {url} is denied."
+            return "Error: URL blocked by security policy (Private IP or invalid protocol)."
 
         try:
-            logger.info(f"🌐 Scraping: {url}")
-            response = requests.get(url, headers=self.headers, timeout=5)
+            # [Fix] SSRF Defense: Disable redirects
+            # Prevents open redirects from taking the scraper to an internal IP after the initial check.
+            response = requests.get(
+                url, 
+                headers=self.headers, 
+                timeout=10,
+                allow_redirects=False 
+            )
+            
+            if response.status_code in (301, 302, 307, 308):
+                return f"Error: Redirects are disabled for security. Target: {response.headers.get('Location')}"
+
             response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            for element in soup(["script", "style", "nav", "footer", "iframe", "svg"]):
-                element.decompose()
-            
-            title = soup.title.string if soup.title else url
-            text = soup.get_text(separator='\n')
-            
-            # Clean text
-            lines = (line.strip() for line in text.splitlines())
-            clean_text = '\n'.join(chunk for chunk in lines if chunk)
-            
-            return f"### 🌐 Source: {title}\nURL: {url}\n\n{clean_text[:20000]}"
+            return response.text[:10000] # Limit return size
             
         except Exception as e:
-            return f"[Error] Could not scrape {url}: {str(e)}"
+            return f"Error scraping URL: {e}"
 
     async def capture_screenshot(self, url: str) -> str:
         """
-        [Phase 2 Upgrade] 使用 Playwright 截图
-        返回: Base64 编码的 PNG 字符串 (data:image/png;base64,...)
+        Captures a screenshot using Playwright (if available).
         """
         if not PLAYWRIGHT_AVAILABLE:
-            return ""
+            return "Error: Playwright not installed."
 
-        # Localhost check is allowed here
-        logger.info(f"📸 Taking screenshot of {url}")
-        
+        # [Fix] Security: Re-validate URL for Playwright
+        # Crucial: Explicitly check scheme to block 'file://' access (LFI)
+        if not self._is_safe_url(url):
+             logger.warning(f"🚫 Blocked screenshot request for unsafe URL: {url}")
+             return "Error: URL blocked by security policy."
+
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return "Error: Only HTTP/HTTPS protocols are supported for screenshots."
+
         try:
             async with async_playwright() as p:
-                # Use webkit or chromium
                 browser = await p.chromium.launch(headless=True)
                 page = await browser.new_page()
                 
-                # Set viewport size
-                await page.set_viewport_size({"width": 1280, "height": 800})
+                # Set a strict timeout
+                await page.goto(url, timeout=15000, wait_until="networkidle")
                 
-                try:
-                    await page.goto(url, timeout=5000, wait_until="domcontentloaded")
-                except:
-                    # Even if timeout, page might be partially loaded
-                    pass
+                # Capture as base64
+                import base64
+                screenshot_bytes = await page.screenshot(type='jpeg', quality=50)
+                encoded = base64.b64encode(screenshot_bytes).decode('utf-8')
                 
-                # Screenshot
-                screenshot_bytes = await page.screenshot(type="png")
                 await browser.close()
-                
-                b64_img = base64.b64encode(screenshot_bytes).decode('utf-8')
-                return f"data:image/png;base64,{b64_img}"
-                
+                return f"data:image/jpeg;base64,{encoded}"
         except Exception as e:
             logger.error(f"Screenshot failed: {e}")
-            return ""
+            return f"Error capturing screenshot: {e}"
