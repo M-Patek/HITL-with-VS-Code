@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
+import * as net from 'net'; // [New]
 
 export class ProcessManager {
     private serverProcess: cp.ChildProcess | undefined;
@@ -11,6 +12,23 @@ export class ProcessManager {
         this.outputChannel = vscode.window.createOutputChannel("Gemini Swarm Engine");
     }
 
+    // [New] 自动查找可用端口
+    private async findAvailablePort(startPort: number): Promise<number> {
+        return new Promise((resolve, reject) => {
+            const server = net.createServer();
+            server.unref();
+            server.on('error', () => {
+                // 端口被占用，尝试下一个
+                resolve(this.findAvailablePort(startPort + 1));
+            });
+            server.listen(startPort, () => {
+                server.close(() => {
+                    resolve(startPort);
+                });
+            });
+        });
+    }
+
     public async start(context: vscode.ExtensionContext): Promise<boolean> {
         if (this.isRunning) {
             vscode.window.showInformationMessage('Gemini Engine is already running! 🚀');
@@ -18,9 +36,10 @@ export class ProcessManager {
         }
 
         const config = vscode.workspace.getConfiguration('geminiSwarm');
+        // [Critical Fix] 统一使用 pythonPath，但建议用户检查是否为 python3
         const pythonPath = config.get<string>('pythonPath') || 'python';
         const apiKey = config.get<string>('apiKey');
-        const port = config.get<number>('serverPort') || 8000;
+        const configuredPort = config.get<number>('serverPort') || 8000;
         const pineconeKey = config.get<string>('pineconeKey') || '';
 
         if (!apiKey) {
@@ -28,8 +47,14 @@ export class ProcessManager {
             return false;
         }
 
-        // 定位 Python 后端入口 (假设打包时 python_backend 文件夹在插件根目录)
-        // 在开发模式下，可能需要指向源码目录
+        // [New] 自动检测端口
+        const port = await this.findAvailablePort(configuredPort);
+        if (port !== configuredPort) {
+            this.outputChannel.appendLine(`[Info] Port ${configuredPort} is busy. Switched to ${port}.`);
+            // 更新配置，以便前端能连上正确的端口
+            await config.update('serverPort', port, vscode.ConfigurationTarget.Workspace);
+        }
+
         const scriptPath = context.asAbsolutePath(path.join('python_backend', 'api_server.py'));
         const cwd = path.dirname(scriptPath);
 
@@ -43,9 +68,9 @@ export class ProcessManager {
                 env: {
                     ...process.env,
                     PORT: port.toString(),
-                    GEMINI_API_KEYS: `["${apiKey}"]`, // 注入 Key
+                    GEMINI_API_KEYS: `["${apiKey}"]`,
                     PINECONE_API_KEY: pineconeKey,
-                    PYTHONUNBUFFERED: '1' // 保证日志实时刷新
+                    PYTHONUNBUFFERED: '1'
                 }
             });
 
