@@ -1,17 +1,28 @@
-const { createApp, ref, nextTick, onMounted } = Vue;
+const { createApp, ref, nextTick, onMounted, watch } = Vue;
 
 const app = createApp({
     setup() {
         const vscode = acquireVsCodeApi();
         
+        // [New] State Persistence Logic
+        const oldState = vscode.getState() || { messages: [], serverPort: 8000 };
+
         // State
-        const messages = ref([]);
+        const messages = ref(oldState.messages || []);
         const userInput = ref('');
         const isProcessing = ref(false);
-        const serverPort = ref(8000); 
+        const serverPort = ref(oldState.serverPort || 8000); 
         const currentTaskId = ref(null);
         const chatContainer = ref(null);
         let contextResolver = null;
+
+        // [New] Watch state changes and save
+        watch([messages, serverPort], () => {
+            vscode.setState({
+                messages: messages.value,
+                serverPort: serverPort.value
+            });
+        }, { deep: true });
 
         onMounted(() => {
             window.addEventListener('message', event => {
@@ -19,7 +30,10 @@ const app = createApp({
                 switch (message.type) {
                     case 'init':
                         serverPort.value = message.port;
-                        addSystemMessage(`🔌 Engine Connected on Port ${serverPort.value}`);
+                        // Don't clear history on init, just append info
+                        if (messages.value.length === 0) {
+                            addSystemMessage(`🔌 Engine Connected on Port ${serverPort.value}`);
+                        }
                         break;
                     case 'context_response':
                         if (contextResolver) {
@@ -33,6 +47,7 @@ const app = createApp({
                 }
             });
             vscode.postMessage({ type: 'webview_ready' });
+            scrollToBottom();
         });
 
         // Methods
@@ -52,19 +67,21 @@ const app = createApp({
         const handleTriggerFix = (errorMsg, errorCtx) => {
             const fixPrompt = `Please fix the following error:\n"${errorMsg}"\n\nCode Context:\n${errorCtx}`;
             userInput.value = fixPrompt;
-            startTask(); 
+            // startTask(); // Let user confirm before sending
         };
 
         const fetchContextFromVSCode = () => {
             return new Promise((resolve) => {
                 contextResolver = resolve;
                 vscode.postMessage({ type: 'get_context' });
+                // [Optimization] 增加超时时间到 10s，防止大型项目超时
                 setTimeout(() => {
                     if (contextResolver) {
                         resolve({ file_context: null, project_structure: "", diagnostics: "" });
                         contextResolver = null;
+                        addSystemMessage("⚠️ Context collection timed out (10s).");
                     }
-                }, 3000);
+                }, 10000);
             });
         };
 
@@ -75,6 +92,7 @@ const app = createApp({
             userInput.value = '';
             messages.value.push({ role: 'user', content: text });
             isProcessing.value = true;
+            scrollToBottom();
 
             try {
                 addSystemMessage("👁️ Scanning workspace context...");
@@ -125,7 +143,6 @@ const app = createApp({
                 scrollToBottom();
             });
 
-            // [Optimization] 图片显示支持
             evtSource.addEventListener('image_generated', (e) => {
                 const data = JSON.parse(e.data);
                 if (data.images && data.images.length > 0) {
@@ -142,8 +159,13 @@ const app = createApp({
             });
             
             evtSource.addEventListener('error', (e) => {
-                const err = JSON.parse(e.data);
-                addSystemMessage(`⚠️ Engine Error: ${err}`);
+                try {
+                    const err = JSON.parse(e.data);
+                    addSystemMessage(`⚠️ Engine Error: ${err}`);
+                } catch {
+                     // EventSource error event doesn't always have data
+                     // addSystemMessage(`⚠️ Connection Error`);
+                }
             });
 
             evtSource.addEventListener('finish', () => {
