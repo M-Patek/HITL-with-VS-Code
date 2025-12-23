@@ -40,14 +40,30 @@ class CodingCrewNodes:
         print(f"   💰 Cost: ${cost:.6f} | Total: ${ps.cost_stats.total_cost:.4f}")
 
     def _extract_json(self, text: str) -> Dict[str, Any]:
-        """[Robustness] Extract JSON from text using Regex"""
+        """
+        [Robustness Fix] 增强型 JSON 提取器
+        优先匹配 Markdown 代码块，然后尝试非贪婪匹配，最后尝试寻找最外层大括号。
+        """
+        text = text.strip()
         try:
-            # Find the outer-most JSON object
-            match = re.search(r"\{.*\}", text, re.DOTALL)
+            # 1. 尝试匹配 ```json ... ``` 代码块
+            # [Fix] 使用字符串拼接避免 Markdown 渲染中断: r"``" + r"`"
+            code_block_pattern = r"``" + r"`(?:json)?\s*(\{.*?\})\s*``" + r"`"
+            match = re.search(code_block_pattern, text, re.DOTALL | re.IGNORECASE)
             if match:
-                json_str = match.group(0)
+                return json.loads(match.group(1))
+            
+            # 2. 尝试匹配纯 JSON 对象 (非贪婪)
+            # 使用 regex 寻找第一个 { 和 对应的 } 比较困难，这里简化为寻找最外层
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1:
+                json_str = text[start:end+1]
                 return json.loads(json_str)
-        except:
+                
+        except json.JSONDecodeError:
+            pass
+        except Exception:
             pass
         return None
 
@@ -89,10 +105,18 @@ class CodingCrewNodes:
             mcp_tools=mcp_instructions
         )
         
-        # [Memory Fix] Inject Chat History
+        # [Memory Fix] Sliding Window (保留最近 10 条)
+        # 防止 Token 爆炸和 "Lost in the Middle"
         contents = []
+        MAX_HISTORY = 10
+        
         if ps.full_chat_history:
-            for msg in ps.full_chat_history:
+            # 切片获取最近的历史记录
+            recent_history = ps.full_chat_history[-MAX_HISTORY:]
+            if len(ps.full_chat_history) > MAX_HISTORY:
+                print(f"   ✂️ Chat History Truncated: {len(ps.full_chat_history)} -> {len(recent_history)}")
+            
+            for msg in recent_history:
                 role = "user" if msg['role'] == 'user' else "model"
                 contents.append({"role": role, "parts": [{"text": msg['content']}]})
         
@@ -114,11 +138,15 @@ class CodingCrewNodes:
         tool_call = MCPToolRegistry.parse_tool_call(response_text)
         
         if not tool_call:
-            match = re.search(r"```python(.*?)```", response_text, re.DOTALL)
+            # 同样使用拼接方式匹配 python 代码块，防止渲染中断
+            py_pattern = r"``" + r"`python(.*?)``" + r"`"
+            match = re.search(py_pattern, response_text, re.DOTALL)
             if match:
                 code = match.group(1).strip()
             elif "```" in response_text:
-                 match = re.search(r"```(.*?)```", response_text, re.DOTALL)
+                 # 通用代码块匹配
+                 generic_pattern = r"``" + r"`(.*?)``" + r"`"
+                 match = re.search(generic_pattern, response_text, re.DOTALL)
                  if match: code = match.group(1).strip()
             ps.code_blocks["coder"] = code
         else:
@@ -201,13 +229,13 @@ class CodingCrewNodes:
         status = "reject"
         feedback = "Parse Error"
         
+        # [Robustness Fix] 使用新的提取器
         report = self._extract_json(response_text)
         if report:
             status = report.get("status", "reject").lower()
             feedback = report.get("feedback", "")
         else:
-            # [Logic Fix] Specific feedback for parse error
-            feedback = f"Reviewer failed to produce JSON. Raw Output: {response_text[:200]}"
+            feedback = f"Reviewer failed to produce valid JSON. Raw Output: {response_text[:200]}"
         
         return {
             "functional_status": status,
@@ -237,6 +265,7 @@ class CodingCrewNodes:
         self._update_cost(ps, usage)
         
         issues = "No issues."
+        # [Robustness Fix] 使用新的提取器
         data = self._extract_json(response_text)
         if data:
             if not data.get("safe", True):
@@ -268,9 +297,8 @@ class CodingCrewNodes:
         print(f"🔧 [Reflector] Fixing strategy...")
         ps = self._get_project_state(state)
         
-        # [Logic Fix] If reviewer failed to parse, don't ask for reflection on code, ask for format fix
         review_feedback = state.get("review_feedback", "")
-        if "Reviewer failed to produce JSON" in review_feedback:
+        if "Reviewer failed to produce valid JSON" in review_feedback:
             return {"reflection": "The Reviewer could not parse its own output. Please strictly follow the JSON format and retry the same code logic."}
 
         prompt_template = load_prompt(self.base_prompt_path, "reflection.md")
