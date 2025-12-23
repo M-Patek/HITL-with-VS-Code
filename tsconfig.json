@@ -11,7 +11,11 @@
 		"strict": true,
 		"moduleResolution": "node",
 		"esModuleInterop": true,
-		"skipLibCheck": true
+		"skipLibCheck": true,
+		"baseUrl": "./",
+		"paths": {
+			"@/*": ["src/*"]
+		}
 	},
 	"exclude": [
 		"node_modules",
