@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
-import * as net from 'net'; // [New]
+import * as net from 'net'; 
 
 export class ProcessManager {
     private serverProcess: cp.ChildProcess | undefined;
@@ -12,7 +12,7 @@ export class ProcessManager {
         this.outputChannel = vscode.window.createOutputChannel("Gemini Swarm Engine");
     }
 
-    // [New] 自动查找可用端口
+    // 自动查找可用端口
     private async findAvailablePort(startPort: number): Promise<number> {
         return new Promise((resolve, reject) => {
             const server = net.createServer();
@@ -29,6 +29,26 @@ export class ProcessManager {
         });
     }
 
+    // [Optimization] 智能检测 Python 解释器
+    private async resolvePythonPath(configPath: string): Promise<string> {
+        // 如果用户明确指定了路径，直接使用
+        if (configPath && configPath !== 'python') {
+            return configPath;
+        }
+
+        // 尝试探测 python3
+        return new Promise((resolve) => {
+            cp.exec('python3 --version', (err) => {
+                if (!err) {
+                    resolve('python3');
+                } else {
+                    // Fallback to 'python' (可能是 Python 2 或 3，视系统而定)
+                    resolve('python');
+                }
+            });
+        });
+    }
+
     public async start(context: vscode.ExtensionContext): Promise<boolean> {
         if (this.isRunning) {
             vscode.window.showInformationMessage('Gemini Engine is already running! 🚀');
@@ -36,8 +56,7 @@ export class ProcessManager {
         }
 
         const config = vscode.workspace.getConfiguration('geminiSwarm');
-        // [Critical Fix] 统一使用 pythonPath，但建议用户检查是否为 python3
-        const pythonPath = config.get<string>('pythonPath') || 'python';
+        const userPythonPath = config.get<string>('pythonPath') || 'python';
         const apiKey = config.get<string>('apiKey');
         const configuredPort = config.get<number>('serverPort') || 8000;
         const pineconeKey = config.get<string>('pineconeKey') || '';
@@ -47,12 +66,16 @@ export class ProcessManager {
             return false;
         }
 
-        // [New] 自动检测端口
+        // [Performance Fix] 智能解析 Python 路径
+        const pythonPath = await this.resolvePythonPath(userPythonPath);
+        
+        // [Optimization] 自动检测端口，但不再写入 settings.json 造成副作用
         const port = await this.findAvailablePort(configuredPort);
+        
+        // 即使端口变了，我们也不更新配置，而是只在当前会话中使用新端口
+        // 前端 Webview 会通过 'init' 消息接收这个动态端口
         if (port !== configuredPort) {
-            this.outputChannel.appendLine(`[Info] Port ${configuredPort} is busy. Switched to ${port}.`);
-            // 更新配置，以便前端能连上正确的端口
-            await config.update('serverPort', port, vscode.ConfigurationTarget.Workspace);
+            this.outputChannel.appendLine(`[Info] Port ${configuredPort} is busy. Switched to dynamic port ${port}.`);
         }
 
         const scriptPath = context.asAbsolutePath(path.join('python_backend', 'api_server.py'));
@@ -63,8 +86,11 @@ export class ProcessManager {
         this.outputChannel.appendLine(`[Boot] Script: ${scriptPath}`);
 
         try {
-            // [Security Fix] 使用 JSON.stringify 安全地序列化 API Key 列表，防止注入攻击
+            // [Security Fix] 使用 JSON.stringify 安全地序列化 API Key 列表
             const safeApiKeys = JSON.stringify([apiKey]);
+
+            // [Persistence] 传递数据目录路径
+            const dataDir = context.globalStorageUri.fsPath;
 
             this.serverProcess = cp.spawn(pythonPath, [scriptPath], {
                 cwd: cwd,
@@ -73,6 +99,7 @@ export class ProcessManager {
                     PORT: port.toString(),
                     GEMINI_API_KEYS: safeApiKeys,
                     PINECONE_API_KEY: pineconeKey,
+                    SWARM_DATA_DIR: dataDir, // 传入持久化路径
                     PYTHONUNBUFFERED: '1'
                 }
             });
