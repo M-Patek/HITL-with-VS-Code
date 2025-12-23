@@ -19,19 +19,30 @@ def build_coding_crew_graph(rotator: GeminiKeyRotator, checkpointer: Any = None)
     nodes = CodingCrewNodes(rotator)
     workflow = StateGraph(CodingCrewState)
     
+    # Nodes
     workflow.add_node("coder", nodes.coder_node)
     workflow.add_node("executor", nodes.executor_node)
     workflow.add_node("reviewer", nodes.reviewer_node)
+    workflow.add_node("security_guard", nodes.security_node) # [Parallel]
+    workflow.add_node("aggregator", nodes.aggregator_node)   # [Join]
     workflow.add_node("reflector", nodes.reflector_node) 
     workflow.add_node("summarizer", nodes.summarizer_node)
     
+    # Edges
     workflow.set_entry_point("coder")
-    
     workflow.add_edge("coder", "executor")
-    workflow.add_edge("executor", "reviewer")
     
+    # [Parallel Fork] Executor -> Reviewer & Security
+    workflow.add_edge("executor", "reviewer")
+    workflow.add_edge("executor", "security_guard")
+    
+    # [Join] Reviewer & Security -> Aggregator
+    workflow.add_edge("reviewer", "aggregator")
+    workflow.add_edge("security_guard", "aggregator")
+    
+    # Route from Aggregator
     workflow.add_conditional_edges(
-        "reviewer",
+        "aggregator",
         route_review,
         {
             "reflect": "reflector", 
@@ -43,5 +54,5 @@ def build_coding_crew_graph(rotator: GeminiKeyRotator, checkpointer: Any = None)
     
     return workflow.compile(checkpointer=checkpointer)
 
-# Default export for registry
+# Default export
 graph = build_coding_crew_graph(GeminiKeyRotator("http://mock", "mock"))
