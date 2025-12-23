@@ -86,13 +86,14 @@ class RepositoryMapper:
             if not code.strip():
                 return None
             
-            # [Performance Fix] 即使文件小于 1MB，如果行数过多（如压缩代码），解析也会极慢
-            # 简单启发式：如果前 100 个字符包含大量不可见字符或单行极长，可能需要跳过
-            # 这里暂时只做 Tree-sitter 解析保护
-            
-            language = get_language(lang_name)
-            parser = get_parser(lang_name)
-            tree = parser.parse(bytes(code, "utf8"))
+            # [Optimization] 单文件容错保护
+            try:
+                language = get_language(lang_name)
+                parser = get_parser(lang_name)
+                tree = parser.parse(bytes(code, "utf8"))
+            except Exception as e:
+                logger.warning(f"Tree-sitter init failed for {lang_name}: {e}")
+                return f"{rel_path}:\n  (Parser Error)"
             
             # 使用查询提取定义 (Simplified for demo)
             # 这里的查询语句适配 Python 和 TS/JS
@@ -110,10 +111,15 @@ class RepositoryMapper:
                 """
             
             if not query_scm:
-                return f"{rel_path}:\n  (AST parsing not configured for {lang_name})"
+                # 对于不支持的语言，不返回内容，或者返回前几行
+                return None
 
-            query = language.query(query_scm)
-            captures = query.captures(tree.root_node)
+            try:
+                query = language.query(query_scm)
+                captures = query.captures(tree.root_node)
+            except Exception as e:
+                logger.warning(f"Tree-sitter query failed for {file_path}: {e}")
+                return None
             
             definitions = []
             for node, tag in captures:
@@ -137,5 +143,6 @@ class RepositoryMapper:
             return f"{rel_path}:\n" + "\n".join(definitions)
 
         except Exception as e:
+            # [Fix] Catch all to prevent crashing the whole map generation
             logger.warning(f"Failed to parse {rel_path}: {e}")
             return None
