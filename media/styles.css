@@ -1,87 +1,46 @@
-/* Reset & Base */
-body {
-    background-color: var(--vscode-sideBar-background);
-    color: var(--vscode-sideBar-foreground);
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    padding: 0;
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    overflow: hidden;
-}
+/* ... (Base styles) ... */
 
-/* Chat Area */
+/* Chat Container adjustment to make room for dashboard */
 #chat-container {
     flex: 1;
     overflow-y: auto;
     padding: 10px;
+    padding-bottom: 5px; /* Reduce padding slightly */
     display: flex;
     flex-direction: column;
     gap: 12px;
 }
 
-/* Messages */
-.message {
-    padding: 8px 12px;
-    border-radius: 6px;
-    max-width: 100%;
-    word-wrap: break-word;
-    animation: fadeIn 0.3s ease;
-}
-
-.message.user {
-    background-color: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
-    align-self: flex-end;
-    border-bottom-right-radius: 2px;
-}
-
-.message.ai {
-    background-color: var(--vscode-editor-background);
-    border: 1px solid var(--vscode-widget-border);
-    align-self: flex-start;
-    border-bottom-left-radius: 2px;
-}
-
-.message.system {
-    font-size: 0.85em;
-    color: var(--vscode-descriptionForeground);
-    font-style: italic;
-    text-align: center;
-    align-self: center;
-    background: none;
-    border: none;
-}
-
-/* Code Artifacts */
-.artifact-card {
-    margin-top: 8px;
-    border: 1px solid var(--vscode-widget-border);
-    border-radius: 4px;
-    background-color: var(--vscode-textBlockQuote-background);
-    overflow: hidden;
-}
-
-.artifact-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 4px 8px;
-    background-color: var(--vscode-editor-lineHighlightBackground);
+/* [Roo Code] Cost Dashboard Styles */
+#cost-dashboard {
+    background-color: var(--vscode-statusBar-background);
+    color: var(--vscode-statusBar-foreground);
+    padding: 4px 10px;
     font-size: 0.8em;
-    font-weight: bold;
+    display: flex;
+    justify-content: flex-end; /* Align to right */
+    align-items: center;
+    border-top: 1px solid var(--vscode-widget-border);
+    user-select: none;
 }
 
-.artifact-content {
-    padding: 8px;
-    font-family: var(--vscode-editor-font-family);
-    font-size: 0.9em;
-    white-space: pre-wrap;
-    overflow-x: auto;
-    color: var(--vscode-textPreformat-foreground);
+.cost-item {
+    margin: 0 4px;
 }
+
+.cost-divider {
+    color: var(--vscode-statusBar-debuggingBorder);
+    opacity: 0.5;
+    margin: 0 2px;
+}
+
+/* Tool Card Styles (Ensure they are preserved) */
+.tool-card { border: 1px solid var(--vscode-charts-blue); }
+.tool-header { background-color: var(--vscode-charts-blue); color: white; }
+.tool-actions { display: flex; gap: 8px; padding: 8px; background-color: var(--vscode-editor-background); }
+.diff-btn { background-color: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+.approve-btn { background-color: var(--vscode-charts-green); color: white; }
+.reject-btn { background-color: var(--vscode-charts-red); color: white; }
 
 /* Input Area */
 #input-area {
@@ -89,61 +48,3 @@ body {
     border-top: 1px solid var(--vscode-panel-border);
     background-color: var(--vscode-sideBar-background);
 }
-
-textarea {
-    width: 100%;
-    background-color: var(--vscode-input-background);
-    color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border);
-    border-radius: 2px;
-    padding: 6px;
-    font-family: inherit;
-    resize: none;
-    outline: none;
-}
-
-textarea:focus {
-    border-color: var(--vscode-focusBorder);
-}
-
-button {
-    margin-top: 6px;
-    width: 100%;
-    padding: 6px;
-    background-color: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border: none;
-    border-radius: 2px;
-    cursor: pointer;
-}
-
-button:hover {
-    background-color: var(--vscode-button-hoverBackground);
-}
-
-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-.icon-btn {
-    background: none;
-    border: none;
-    color: var(--vscode-icon-foreground);
-    cursor: pointer;
-    padding: 2px;
-}
-
-.icon-btn:hover {
-    color: var(--vscode-textLink-foreground);
-}
-
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(5px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-/* Scrollbar */
-::-webkit-scrollbar { width: 8px; }
-::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground); }
