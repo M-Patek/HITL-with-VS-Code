@@ -1,0 +1,107 @@
+{
+  "name": "gemini-swarm-vscode",
+  "displayName": "Gemini Swarm Engine",
+  "description": "Embedded AI Coding Engine powered by Gemini 2.5 & LangGraph",
+  "version": "0.1.0",
+  "publisher": "gemini-swarm",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Gemini Swarm",
+      "properties": {
+        "geminiSwarm.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python interpreter."
+        },
+        "geminiSwarm.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Google Gemini API Key."
+        },
+        "geminiSwarm.serverPort": {
+          "type": "number",
+          "default": 8000,
+          "description": "Port for local Python engine."
+        },
+        "geminiSwarm.pineconeKey": {
+          "type": "string",
+          "default": "",
+          "description": "Pinecone API Key (Optional)."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "gemini-swarm.startEngine",
+        "title": "Gemini: Start Engine",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "gemini-swarm.stopEngine",
+        "title": "Gemini: Stop Engine",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "gemini-swarm.showPanel",
+        "title": "Gemini: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "gemini-swarm.installDependencies",
+        "title": "Gemini: Install Python Dependencies",
+        "icon": "$(cloud-download)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gemini-swarm-container",
+          "title": "Gemini Swarm",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "views": {
+      "gemini-swarm-container": [
+        {
+          "id": "gemini-swarm.chatView",
+          "name": "Mission Control"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package-backend && npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "package-backend": "node scripts/package_backend.js",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "18.x",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3",
+    "ts-loader": "^9.5.1",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "axios": "^1.6.2"
+  }
+}
