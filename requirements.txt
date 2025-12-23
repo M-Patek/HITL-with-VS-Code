@@ -2,21 +2,13 @@ Core Frameworks
 
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
-
-[Security Fix] Pin Pydantic to avoid breaking changes in V3
-
 pydantic>=2.6.0,<3.0.0
 
 AI & Graph
 
-[Security Fix] Pin LangGraph to avoid API breakage in rapid development phase
-
 langgraph>=0.0.26,<0.1.0
 google-generativeai>=0.3.0
 chromadb>=0.4.0
-
-[Bug Fix] Missing dependency for RepoMap
-
 tree-sitter-languages>=1.10.2
 
 Utilities
@@ -25,9 +17,6 @@ httpx>=0.26.0
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 termcolor>=2.4.0
-
-[Security Fix] For robust zombie process detection
-
 psutil>=5.9.0
 
 Tools
@@ -35,6 +24,10 @@ Tools
 docker>=7.0.0
 tavily-python>=0.3.0
 
-Security & Performance (Optional but recommended)
+[Phase 2 Upgrade] Vision Support
+
+playwright>=1.40.0
+
+Security & Performance
 
 python-multipart>=0.0.9
