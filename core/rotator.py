@@ -98,7 +98,11 @@ class GeminiKeyRotator:
                     elif response.status_code in [429, 500, 503]:
                         logger.warning(f"API Error {response.status_code}. Rotating key and retrying...")
                         self._rotate_key()
-                        wait_time = 1 ** attempt # 稍微减少等待时间，因为换了Key
+                        
+                        # [Critical Fix] 修复指数退避算法
+                        # Old: 1 ** attempt (Always 1)
+                        # New: 2 ** attempt (1, 2, 4...)
+                        wait_time = min(30, 2 ** attempt) 
                         await asyncio.sleep(wait_time)
                     else:
                         logger.error(f"API Failed: {response.text}")
