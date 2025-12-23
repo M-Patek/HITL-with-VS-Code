@@ -27,4 +27,5 @@ class GoogleSearchTool:
             return self._fallback_search(query)
 
     def _fallback_search(self, query: str) -> str:
-        return f"[Mock Search Result] Found generic info about '{query}'. Python 3.12 is the latest stable version."
+        # [Fix] Honest failure instead of hallucination
+        return f"[System] Search failed: Internet access or Search API key unavailable. I cannot verify facts about '{query}' online."
