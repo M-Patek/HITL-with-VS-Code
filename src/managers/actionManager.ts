@@ -38,11 +38,12 @@ export class ActionManager implements vscode.Disposable {
         if (!vscode.workspace.workspaceFolders) return null;
 
         const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-        const fullPath = path.resolve(rootPath, relativePath);
+        // [Security Fix] Resolve and Normalize to prevent traversal
+        const fullPath = path.normalize(path.resolve(rootPath, relativePath));
         
-        const relative = path.relative(rootPath, fullPath);
-        if (relative.startsWith('..') || path.isAbsolute(relative)) {
-            vscode.window.showErrorMessage(`❌ Security Alert: Illegal path access detected! (${relativePath})`);
+        // Ensure it is still within root
+        if (!fullPath.startsWith(rootPath)) {
+            vscode.window.showErrorMessage(`❌ Security Alert: Path traversal attempt blocked! (${relativePath})`);
             return null;
         }
 
@@ -90,7 +91,6 @@ export class ActionManager implements vscode.Disposable {
     }
 
     public async runInTerminal(command: string) {
-        // [Security Fix] 防止命令被截断，使用文档展示完整命令
         const header = "⚠️ GEMINI SWARM SECURITY CHECK ⚠️\n\nThe AI wants to execute the following command in your terminal.\nPlease review it CAREFULLY before approving.\n\nCOMMAND:\n";
         const docContent = header + "-".repeat(50) + "\n" + command + "\n" + "-".repeat(50);
         
@@ -126,7 +126,6 @@ export class ActionManager implements vscode.Disposable {
         if (isGit) {
             await this.ensureCheckpoint(`Update ${relativePath}`);
         } else {
-            // [Security Fix] Fail-Closed Backup
             try {
                 if (fs.existsSync(fullPath)) {
                     const backupPath = `${fullPath}.bak`;
@@ -149,10 +148,6 @@ export class ActionManager implements vscode.Disposable {
         }
     }
 
-    /**
-     * [Robustness Fix] 增强型 Diff 应用算法 (Fuzzy Match)
-     * 允许 LLM 输出的代码块在缩进或空行上与原文件有细微差异。
-     */
     public async applySmartDiff(relativePath: string, searchBlock: string, replaceBlock: string) {
         const fullPath = this.validatePath(relativePath);
         if (!fullPath) return;
@@ -165,7 +160,6 @@ export class ActionManager implements vscode.Disposable {
 
             const fileContent = await fs.promises.readFile(fullPath, 'utf8');
             const fileLines = fileContent.split(/\r?\n/);
-            // 过滤空行进行匹配
             const searchLines = searchBlock.split(/\r?\n/).map(l => l.trim()).filter(l => l !== "");
             
             if (searchLines.length === 0) {
@@ -173,15 +167,15 @@ export class ActionManager implements vscode.Disposable {
                  return;
             }
 
-            // 模糊匹配逻辑：查找文件行与搜索块匹配的起始位置
-            // 忽略原文件中的空行
-            let matchIndex = -1;
+            // [Robustness Fix] Strict Multi-Match Detection
+            const matchedIndices: number[] = [];
+
             for (let i = 0; i <= fileLines.length - searchLines.length; i++) {
                 let match = true;
                 let fileCursor = i;
                 
                 for (let j = 0; j < searchLines.length; j++) {
-                    // 跳过原文件中的空行
+                    // Skip empty lines in source
                     while (fileCursor < fileLines.length && fileLines[fileCursor].trim() === "") {
                         fileCursor++;
                     }
@@ -194,18 +188,23 @@ export class ActionManager implements vscode.Disposable {
                 }
 
                 if (match) {
-                    matchIndex = i;
-                    break;
+                    matchedIndices.push(i);
                 }
             }
 
-            if (matchIndex === -1) {
+            if (matchedIndices.length === 0) {
                 vscode.window.showErrorMessage(`❌ Diff failed: Could not locate code block in ${relativePath}`);
                 return;
             }
 
-            // 重构文件内容
-            // 计算被替换的范围（包含中间跳过的空行）
+            if (matchedIndices.length > 1) {
+                vscode.window.showErrorMessage(`❌ Diff failed: Ambiguous match. Found ${matchedIndices.length} occurrences of the code block. Please provide more context.`);
+                return;
+            }
+
+            const matchIndex = matchedIndices[0];
+
+            // Reconstruct file content
             let fileCursor = matchIndex;
             for (let j = 0; j < searchLines.length; j++) {
                  while (fileCursor < fileLines.length && fileLines[fileCursor].trim() === "") {
@@ -213,7 +212,6 @@ export class ActionManager implements vscode.Disposable {
                 }
                 fileCursor++; 
             }
-            // fileCursor 现在指向匹配块之后的行
 
             const before = fileLines.slice(0, matchIndex).join('\n');
             const after = fileLines.slice(fileCursor).join('\n');
