@@ -6,6 +6,7 @@ import io
 import base64
 import os
 import uuid
+import re
 from typing import Tuple, List, Optional, Dict
 
 logger = logging.getLogger("Tools-Sandbox")
@@ -121,8 +122,9 @@ class DockerSandbox:
 
     def _wrap_code_with_plot_saving(self, code: str, save_path: str) -> str:
         # [Fix] 只有在确实导入了 matplotlib 时才注入代码
-        # 简单的字符串检查可能误判，这里稍微严格一点，但仍然保持简单
-        if "import matplotlib" in code or "from matplotlib" in code:
+        # 使用正则表达式进行更严格的匹配，避免注释中的单词误触发
+        # 匹配行首的 import matplotlib 或 from matplotlib，允许前导空格
+        if re.search(r"^\s*(import|from)\s+matplotlib", code, re.MULTILINE):
             header = f"import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
             footer = f"\ntry:\n    if plt.get_fignums():\n        plt.savefig('{save_path}')\nexcept: pass"
             return header + code + footer
