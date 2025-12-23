@@ -1,15 +1,27 @@
+Core Frameworks
+
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.6.0
+
+AI & Graph
+
 langgraph>=0.0.26
-httpx
-requests
-docker>=7.0.0
-tavily-python
-
-[Critical Fix] Added missing dependencies
-
 google-generativeai>=0.3.0
 chromadb>=0.4.0
-beautifulsoup4
-termcolor
+
+Utilities
+
+httpx>=0.26.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+termcolor>=2.4.0
+
+Tools
+
+docker>=7.0.0
+tavily-python>=0.3.0
+
+Security & Performance (Optional but recommended)
+
+python-multipart>=0.0.9
