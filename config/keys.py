@@ -31,8 +31,11 @@ PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
 VECTOR_INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "swarm-memory")
 
 # --- Model Tiers ---
-TIER_1_FAST = "gemini-2.5-flash-preview-09-2025"
-TIER_2_PRO = "gemini-2.5-flash-preview-09-2025" 
-GEMINI_MODEL_NAME = TIER_2_PRO
+# [Config Update] 使用更稳定且通用的模型名称
+TIER_1_FAST = "gemini-1.5-flash"
+TIER_2_PRO = "gemini-1.5-pro" 
+
+# 默认使用 Flash 以平衡速度和成本，或者从环境变量读取
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", TIER_1_FAST)
 
 __all__ = ["GEMINI_API_KEYS", "GATEWAY_API_BASE", "GEMINI_MODEL_NAME", "PINECONE_API_KEY", "PINECONE_ENVIRONMENT", "VECTOR_INDEX_NAME"]
