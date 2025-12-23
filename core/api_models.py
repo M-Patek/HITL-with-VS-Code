@@ -21,7 +21,10 @@ class TaskRequest(BaseModel):
     # [VS Code] 新增文件上下文
     file_context: Optional[FileContext] = Field(None, description="当前编辑器上下文")
     
-    # [VS Code] 项目级上下文 (可选)
+    # [Aider Upgrade] 传入工作区根路径，用于生成 Repo Map
+    workspace_root: Optional[str] = Field(None, description="工作区根目录绝对路径")
+    
+    # [Legacy] 旧的项目结构字符串，如果生成了 Repo Map 则可以忽略此字段
     project_structure: Optional[str] = Field(None, description="简化的文件树结构")
 
 class StreamEvent(BaseModel):
