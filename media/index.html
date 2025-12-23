@@ -1,61 +1,53 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- CSP: Allow local scripts/styles, and allow connection to localhost Python server -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src {{cspSource}} 'unsafe-eval' https://unpkg.com; connect-src 'self' http://127.0.0.1:*;">
-    
-    <link href="{{stylesUri}}" rel="stylesheet">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <!-- ... (Head content) ... -->
+    <link href="${stylesUri}" rel="stylesheet">
+    <script src="[https://unpkg.com/vue@3/dist/vue.global.prod.js](https://unpkg.com/vue@3/dist/vue.global.prod.js)"></script>
     <title>Gemini Swarm</title>
 </head>
 <body>
     <div id="app">
-        <!-- Chat History -->
+        <!-- Chat Container -->
         <div id="chat-container" ref="chatContainer">
-            <div v-if="messages.length === 0" class="message system">
-                🐱 Gemini Swarm Engine Ready.<br>Waiting for instructions...
-            </div>
-            
+            <!-- ... (Messages Loop) ... -->
             <div v-for="(msg, idx) in messages" :key="idx" :class="['message', msg.role]">
-                
-                <!-- System/User Text -->
-                <div v-if="msg.type !== 'code'">{{ msg.content }}</div>
-
-                <!-- Code Artifact -->
-                <div v-else class="artifact-card">
-                    <div class="artifact-header">
-                        <span><i class="codicon codicon-code"></i> {{ msg.label }}</span>
-                        <button class="icon-btn" @click="insertCode(msg.content)" title="Insert to Editor">
-                            Insert 📥
-                        </button>
+                <!-- ... (Content render logic) ... -->
+                <div v-if="msg.type === 'tool_proposal'" class="artifact-card tool-card">
+                    <!-- ... (Tool Card) ... -->
+                    <div class="tool-actions" v-if="!msg.approved && !msg.rejected">
+                         <button v-if="msg.content.tool === 'write_to_file'" class="diff-btn" @click="viewDiff(msg.content)">👀 View Diff</button>
+                         <button class="approve-btn" @click="approveTool(idx, msg.content)">✅ Approve</button>
+                         <button class="reject-btn" @click="rejectTool(idx)">❌ Reject</button>
                     </div>
-                    <div class="artifact-content">{{ msg.content }}</div>
+                    <!-- ... -->
                 </div>
-
+                <!-- ... -->
+                <div v-else>{{ msg.content }}</div>
             </div>
+        </div>
 
-            <div v-if="isProcessing" class="message system">
-                <span class="loading-dots">Thinking</span>
-            </div>
+        <!-- [Roo Code] Cost Dashboard -->
+        <div id="cost-dashboard" v-if="costStats.totalTokens > 0">
+            <span class="cost-item">
+                💎 Tokens: <strong>{{ formatNumber(costStats.totalTokens) }}</strong>
+            </span>
+            <span class="cost-divider">|</span>
+            <span class="cost-item">
+                💸 Cost: <strong>${{ costStats.totalCost.toFixed(4) }}</strong>
+            </span>
+            <span class="cost-divider">|</span>
+            <span class="cost-item">
+                🔄 Req: {{ costStats.requests }}
+            </span>
         </div>
 
         <!-- Input Area -->
         <div id="input-area">
-            <textarea 
-                v-model="userInput" 
-                @keydown.enter.prevent="startTask"
-                placeholder="Ask Gemini Coding Crew..."
-                rows="3"
-                :disabled="isProcessing"
-            ></textarea>
-            <button @click="startTask" :disabled="isProcessing || !userInput">
-                {{ isProcessing ? 'Processing...' : 'Send Mission 🚀' }}
-            </button>
+            <textarea v-model="userInput" @keydown.enter.prevent="startTask" placeholder="Ask Coding Crew..." rows="3" :disabled="isProcessing"></textarea>
+            <button @click="startTask" :disabled="isProcessing || !userInput">{{ isProcessing ? 'Processing...' : 'Send 🚀' }}</button>
         </div>
     </div>
-
-    <script src="{{scriptUri}}"></script>
+    <script src="${scriptUri}"></script>
 </body>
 </html>
