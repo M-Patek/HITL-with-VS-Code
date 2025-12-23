@@ -2,7 +2,7 @@
   "name": "gemini-swarm-vscode",
   "displayName": "Gemini Swarm Engine",
   "description": "Embedded AI Coding Engine powered by Gemini 2.5 & LangGraph",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "gemini-swarm",
   "engines": {
     "vscode": "^1.85.0"
@@ -22,7 +22,7 @@
         "geminiSwarm.pythonPath": {
           "type": "string",
           "default": "python",
-          "description": "Path to Python interpreter."
+          "description": "Path to Python interpreter (Auto-configured by dependency manager)."
         },
         "geminiSwarm.apiKey": {
           "type": "string",
@@ -38,6 +38,11 @@
           "type": "string",
           "default": "",
           "description": "Pinecone API Key (Optional)."
+        },
+        "geminiSwarm.suppressDockerWarning": {
+          "type": "boolean",
+          "default": false,
+          "description": "Don't show Docker warning on startup."
         }
       }
     },
@@ -58,6 +63,11 @@
         "icon": "$(comment-discussion)"
       },
       {
+        "command": "gemini-swarm.triggerFix",
+        "title": "Gemini: Fix Error at Cursor",
+        "icon": "$(lightbulb)"
+      },
+      {
         "command": "gemini-swarm.installDependencies",
         "title": "Gemini: Install Python Dependencies",
         "icon": "$(cloud-download)"
@@ -66,6 +76,11 @@
         "command": "gemini-swarm.undoLastChange",
         "title": "Gemini: Undo Last AI Change",
         "icon": "$(discard)"
+      },
+      {
+        "command": "gemini-swarm.semanticCommit",
+        "title": "Gemini: Semantic Commit",
+        "icon": "$(git-commit)"
       }
     ],
     "viewsContainers": {
