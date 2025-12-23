@@ -12,9 +12,10 @@ from typing import Tuple, List, Optional, Dict
 logger = logging.getLogger("Tools-Sandbox")
 
 class StatefulSandbox:
-    def __init__(self, task_id: str, image: str = "python:3.9-slim"):
+    def __init__(self, task_id: str, image: str = "python:3.9-slim", workspace_root: str = None):
         self.task_id = task_id
         self.image = image
+        self.workspace_root = workspace_root # [Sandbox Fix] 接收宿主工作区路径
         self.container_name = f"swarm_session_{task_id}"
         self.client = None
         self.container = None
@@ -45,6 +46,16 @@ class StatefulSandbox:
                 return
 
             logger.info(f"🚀 Starting new session: {self.container_name}")
+            
+            # [Sandbox Fix] 配置 Volumes 挂载
+            volumes = {}
+            if self.workspace_root and os.path.exists(self.workspace_root):
+                # 将宿主工作区挂载到容器内的 /workspace
+                volumes[self.workspace_root] = {'bind': '/workspace', 'mode': 'rw'}
+                logger.info(f"📂 Mounted workspace: {self.workspace_root} -> /workspace")
+            else:
+                logger.info("⚠️ No workspace root provided, using ephemeral /workspace")
+
             self.container = self.client.containers.run(
                 self.image,
                 detach=True,
@@ -52,9 +63,13 @@ class StatefulSandbox:
                 name=self.container_name,
                 entrypoint="tail -f /dev/null", 
                 mem_limit="512m",
-                network_mode="bridge" 
+                network_mode="bridge",
+                volumes=volumes,
+                working_dir="/workspace" # [Sandbox Fix] 默认工作目录
             )
-            self.container.exec_run("mkdir -p /workspace")
+            # 如果没有挂载卷，手动创建目录
+            if not volumes:
+                self.container.exec_run("mkdir -p /workspace")
 
         except Exception as e:
             logger.error(f"Failed to start sandbox session: {e}")
@@ -63,7 +78,6 @@ class StatefulSandbox:
     def execute_code(self, code: str, timeout: int = 30) -> Tuple[str, str, List[Dict[str, str]]]:
         """在当前会话中执行代码"""
         if not self.docker_available or not self.container:
-            # [Fix] Explicit failure for Mock Mode to prevent hallucination
             return (
                 "", 
                 "[System] Docker unavailable. Code execution skipped. Please enable Docker to run code safely.",
@@ -74,6 +88,9 @@ class StatefulSandbox:
             run_id = str(uuid.uuid4())[:8]
             script_filename = f"script_{run_id}.py"
             plot_filename = f"plot_{run_id}.png"
+            # 注意：如果挂载了卷，这些文件会直接出现在用户的硬盘上
+            # 建议将生成的临时脚本放在 /tmp 或隐藏目录下，避免污染用户工作区
+            # 这里为了简化，还是放在 /workspace 但前缀明确
             container_plot_path = f"/workspace/{plot_filename}"
 
             wrapped_code = self._wrap_code_with_plot_saving(code, container_plot_path)
@@ -91,6 +108,12 @@ class StatefulSandbox:
                 stderr = stdout 
             
             images = self._extract_image_from_container(container_plot_path)
+            
+            # [Cleanup] 尝试清理临时脚本 (Optional)
+            try:
+                self.container.exec_run(f"rm {script_filename} {plot_filename}")
+            except: pass
+
             return stdout, stderr, images
             
         except Exception as e:
