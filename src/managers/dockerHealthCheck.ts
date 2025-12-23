@@ -1,7 +1,6 @@
 import * as cp from 'child_process';
 import * as vscode from 'vscode';
 
-// [Renamed] "SecurityManager" 名不副实，更名为 DockerHealthCheck
 export class DockerHealthCheck {
     
     public async checkDockerAvailability(): Promise<boolean> {
@@ -11,10 +10,9 @@ export class DockerHealthCheck {
         }
 
         return new Promise((resolve) => {
-            // [Security Fix] 使用 spawn 替代 exec
+            // [Security Fix] Use spawn instead of exec to prevent shell injection (though low risk here)
             const proc = cp.spawn('docker', ['info']);
             
-            // 超时控制，防止挂起
             const timer = setTimeout(() => {
                 proc.kill();
                 resolve(false);
