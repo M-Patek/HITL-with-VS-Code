@@ -11,10 +11,19 @@ export interface FileContext {
 
 export class ContextManager {
     
-    // [Privacy Fix] Filter sensitive files
+    // [Privacy Fix] Robust path checking
     private isSensitiveFile(filename: string): boolean {
-        const lower = filename.toLowerCase();
-        if (lower.endsWith('.env') || lower.includes('credentials') || lower.includes('secret') || lower.includes('id_rsa')) {
+        // Normalize path to prevent relative path exploits (e.g. "../.env")
+        const normalized = path.normalize(filename);
+        const lower = normalized.toLowerCase();
+        
+        // Check for specific sensitive patterns
+        if (lower.endsWith('.env') || 
+            lower.includes('credentials') || 
+            lower.includes('secret') || 
+            lower.includes('id_rsa') ||
+            lower.includes('.pem') ||
+            lower.includes('.key')) {
             return true;
         }
         return false;
@@ -40,7 +49,7 @@ export class ContextManager {
             };
         }
 
-        // [Performance Fix] Hard limit on size (e.g., 100KB)
+        // [Performance Fix] Hard limit on size (100KB)
         const rawText = document.getText();
         let content = rawText;
         if (rawText.length > 100 * 1024) {
@@ -82,7 +91,7 @@ export class ContextManager {
         }
 
         const excludePattern = '**/{node_modules,.git,dist,out,build,.vscode,__pycache__,venv,env,.env}/**';
-        const uris = await vscode.workspace.findFiles('**/*', excludePattern, 200); // Increased limit slightly
+        const uris = await vscode.workspace.findFiles('**/*', excludePattern, 200);
 
         const filePaths = uris.map(uri => vscode.workspace.asRelativePath(uri));
         // [Privacy Fix] Double check list for sensitive files
