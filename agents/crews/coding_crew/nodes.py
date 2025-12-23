@@ -19,17 +19,18 @@ class CodingCrewNodes:
         self.base_prompt_path = os.path.join(os.path.dirname(__file__), "prompts")
 
     def _get_project_state(self, state: CodingCrewState) -> ProjectState:
+        """Helper to safely extract ProjectState"""
         return state.get("project_state")
 
     def _ensure_repo_map(self, ps: ProjectState):
-        """[Aider] 确保生成代码库地图"""
+        """[Aider] Lazy load Repo Map"""
         if not ps.repo_map and ps.workspace_root:
             print(f"🗺️ [RepoMap] Analyzing workspace: {ps.workspace_root}")
             mapper = RepositoryMapper(ps.workspace_root)
             ps.repo_map = mapper.generate_map()
 
     def _update_cost(self, ps: ProjectState, usage: Dict[str, int]):
-        """[Roo Code] 更新成本统计"""
+        """[Roo Code] Track Costs"""
         if not usage: return
         in_tokens = usage.get("prompt_tokens", 0)
         out_tokens = usage.get("completion_tokens", 0)
@@ -51,40 +52,52 @@ class CodingCrewNodes:
         
         print(f"\n💻 [Coder] VS Code Engine Activated (Iter: {iteration})")
         
+        # 1. Ensure Map
         self._ensure_repo_map(ps)
+        
+        # 2. Load Prompt
         prompt_template = load_prompt(self.base_prompt_path, "coder.md")
         
-        # --- Context Injection ---
+        # 3. Build File Context
         user_input = ps.user_input
         file_ctx_str = "No file open."
         
         if ps.file_context:
             fc = ps.file_context
             content = fc.content
-            # Truncation logic
-            if len(content) > 10000: content = content[:10000] + "...[Truncated]"
+            # Smart Truncation
+            if len(content) > 10000:
+                content = content[:10000] + "\n...[Content Truncated due to length]..."
             
             file_ctx_str = f"""
 ### 📄 Current File Context (Focus)
 - **Filename**: `{fc.filename}`
 - **Language**: `{fc.language_id}`
 - **Cursor Line**: {fc.cursor_line}
+- **Selection**:
+```
+{fc.selection or "(No selection)"}
+```
 - **Content**:
 ```
 {content}
 ```
 """
         
-        repo_map_str = ps.repo_map if ps.repo_map else "(No Repository Map)"
+        # 4. Build Repo Map Context
+        repo_map_str = ps.repo_map if ps.repo_map else "(No Repository Map available)"
 
+        # 5. Build Feedback Context
         reflection = state.get("reflection", "")
         raw_feedback = state.get("review_feedback", "")
         combined_feedback = raw_feedback
         if reflection:
              combined_feedback = f"### Tech Lead Fix Strategy:\n{reflection}\n\nReview Feedback: {raw_feedback}"
         
+        # 6. Build MCP Instructions
         mcp_instructions = MCPToolRegistry.get_system_prompt_addition()
 
+        # 7. Format Prompt
         formatted_prompt = prompt_template.format(
             user_input=user_input,
             file_context=file_ctx_str,
@@ -93,21 +106,24 @@ class CodingCrewNodes:
             mcp_tools=mcp_instructions
         )
         
-        # Call LLM with Cost Tracking
+        # 8. Call LLM
         response_text, usage = self.rotator.call_gemini_with_rotation(
             model_name=GEMINI_MODEL_NAME,
             contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
-            system_instruction="你是一个集成在 VS Code 中的 AI 编程助手，请使用提供的 MCP 工具来操作文件和终端。",
+            system_instruction="You are a VS Code AI Copilot. Use MCP tools to edit files. Think step-by-step.",
             complexity="complex"
         )
+        
+        # 9. Track Cost
         self._update_cost(ps, usage)
         
         code = response_text or ""
         
-        # Parse Tool Call
+        # 10. Parse Tool Call (Roo Code)
         tool_call = MCPToolRegistry.parse_tool_call(response_text)
         
         if not tool_call:
+            # Fallback to legacy markdown code block parsing
             match = re.search(r"```python(.*?)```", response_text, re.DOTALL)
             if match:
                 code = match.group(1).strip()
@@ -116,7 +132,7 @@ class CodingCrewNodes:
                  if match: code = match.group(1).strip()
             ps.code_blocks["coder"] = code
         else:
-            ps.code_blocks["coder"] = response_text
+            ps.code_blocks["coder"] = response_text # Keep full thought process
             ps.artifacts["pending_tool_call"] = tool_call
 
         return {
@@ -134,6 +150,7 @@ class CodingCrewNodes:
         # 1. Check for MCP Tool Call (Client Side Execution)
         if "pending_tool_call" in ps.artifacts:
             print("   🛠️ Tool Call detected, waiting for Client Approval...")
+            # We don't execute here, we wait for frontend
             return {
                 "project_state": ps,
                 "execution_stdout": "[Waiting for Client Tool Execution]",
@@ -188,7 +205,6 @@ class CodingCrewNodes:
             stderr=stderr
         )
         
-        # Call LLM
         response_text, usage = self.rotator.call_gemini_with_rotation(
             model_name=GEMINI_MODEL_NAME,
             contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
@@ -209,8 +225,6 @@ class CodingCrewNodes:
                 report = json.loads(json_str)
                 status = report.get("status", "reject").lower()
                 feedback = report.get("feedback", "")
-            else:
-                pass 
         except Exception as e:
             print(f"   ⚠️ Review JSON Parse Failed: {e}")
             pass
@@ -238,7 +252,6 @@ class CodingCrewNodes:
             review_report=json.dumps(state.get("review_report", {}))
         )
         
-        # Call LLM
         response_text, usage = self.rotator.call_gemini_with_rotation(
             model_name=GEMINI_MODEL_NAME,
             contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
@@ -261,7 +274,6 @@ class CodingCrewNodes:
             execution_output=state.get("execution_stdout", "")[:1000]
         )
         
-        # Call LLM
         response_text, usage = self.rotator.call_gemini_with_rotation(
             model_name=GEMINI_MODEL_NAME,
             contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
