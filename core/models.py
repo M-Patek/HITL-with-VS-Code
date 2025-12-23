@@ -10,40 +10,30 @@ class CostStats(BaseModel):
     request_count: int = 0
 
 class ProjectState(BaseModel):
-    """全局项目状态"""
+    """
+    [Cleanup] 全局项目状态 - 精简版
+    移除了所有未使用的分布式字段（如 vector_clock, router_decision 等）。
+    只保留 VS Code Engine 运行所需的核心数据。
+    """
     task_id: str
     user_input: str
-    image_data: Optional[str] = None
     
+    # Context
     file_context: Optional[FileContext] = None
     repo_map: Optional[str] = None
     workspace_root: Optional[str] = None
-    project_structure: Optional[str] = None
     
-    # [Roo Code] 成本统计
+    # Stats
     cost_stats: CostStats = Field(default_factory=CostStats)
 
-    # ... (其他字段保持不变)
-    node_map: Dict[str, Any] = Field(default_factory=dict)
-    root_node: Optional[Any] = None
-    active_node_id: str = "root"
-    next_step: Optional[Dict[str, Any]] = None
-    router_decision: str = "coding_crew" 
-    plan: str = ""
-    full_chat_history: List[Dict[str, Any]] = Field(default_factory=list)
-    messages: List[Any] = Field(default_factory=list)
-    artifacts: Dict[str, Any] = Field(default_factory=dict)
+    # Artifacts & Memory
     code_blocks: Dict[str, str] = Field(default_factory=dict)
-    artifact_history: List[Any] = Field(default_factory=list)
-    user_feedback_queue: Optional[str] = None
-    final_report: Optional[str] = None
+    artifacts: Dict[str, Any] = Field(default_factory=dict)
+    full_chat_history: List[Dict[str, Any]] = Field(default_factory=list)
+    
+    # Execution & Report
     last_error: Optional[str] = None
-    vector_clock: Dict[str, int] = Field(default_factory=lambda: {"main": 0})
-    prefetch_cache: Dict[str, Any] = Field(default_factory=dict)
-    trace_t: str = "0"
-    trace_depth: int = 0
-    trace_history: List[Dict[str, Any]] = Field(default_factory=list)
-    research_summary: Optional[str] = None
+    final_report: Optional[str] = None
 
     class Config:
         arbitrary_types_allowed = True
