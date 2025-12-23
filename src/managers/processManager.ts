@@ -3,27 +3,33 @@ import * as cp from 'child_process';
 import * as path from 'path';
 import * as net from 'net'; 
 
-export class ProcessManager {
+export class ProcessManager implements vscode.Disposable {
     private serverProcess: cp.ChildProcess | undefined;
     private outputChannel: vscode.OutputChannel;
     private isRunning: boolean = false;
     
-    // [Phase 3 Upgrade] Expose active port for other providers (e.g., Completion)
     private static activePort: number = 0;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel("Gemini Swarm Engine");
     }
 
+    public dispose() {
+        this.stop();
+        this.outputChannel.dispose();
+    }
+
     public static getActivePort(): number {
         return ProcessManager.activePort;
     }
 
-    private async findAvailablePort(startPort: number): Promise<number> {
+    private async findAvailablePort(startPort: number, retries = 0): Promise<number> {
+        if (retries > 100) throw new Error("No available ports found after 100 retries.");
+
         return new Promise((resolve, reject) => {
             const server = net.createServer();
             server.unref();
-            server.on('error', () => resolve(this.findAvailablePort(startPort + 1)));
+            server.on('error', () => resolve(this.findAvailablePort(startPort + 1, retries + 1)));
             server.listen(startPort, () => {
                 server.close(() => resolve(startPort));
             });
@@ -33,7 +39,9 @@ export class ProcessManager {
     private async resolvePythonPath(configPath: string): Promise<string> {
         if (configPath && configPath !== 'python') return configPath;
         return new Promise((resolve) => {
-            cp.exec('python3 --version', (err) => resolve(err ? 'python' : 'python3'));
+            // Simple platform check, can be improved
+            const cmd = process.platform === 'win32' ? 'python' : 'python3';
+            cp.exec(`${cmd} --version`, (err) => resolve(err ? 'python' : cmd));
         });
     }
 
@@ -55,34 +63,34 @@ export class ProcessManager {
         }
 
         const pythonPath = await this.resolvePythonPath(userPythonPath);
-        const port = await this.findAvailablePort(configuredPort);
-        ProcessManager.activePort = port; // [Phase 3 Upgrade] Store port
-
-        const scriptPath = context.asAbsolutePath(path.join('python_backend', 'api_server.py'));
-        const cwd = path.dirname(scriptPath);
-
-        this.outputChannel.appendLine(`[Boot] Starting Engine at port ${port}...`);
-
+        
         try {
-            const safeApiKeys = JSON.stringify([apiKey]);
-            const dataDir = context.globalStorageUri.fsPath;
+            const port = await this.findAvailablePort(configuredPort);
+            
+            const scriptPath = context.asAbsolutePath(path.join('python_backend', 'api_server.py'));
+            const cwd = path.dirname(scriptPath);
 
-            this.serverProcess = cp.spawn(pythonPath, [scriptPath], {
-                cwd: cwd,
-                env: {
-                    ...process.env,
-                    PORT: port.toString(),
-                    GEMINI_API_KEYS: safeApiKeys,
-                    PINECONE_API_KEY: pineconeKey,
-                    SWARM_DATA_DIR: dataDir,
-                    PYTHONUNBUFFERED: '1'
-                }
-            });
+            this.outputChannel.appendLine(`[Boot] Starting Engine at port ${port}...`);
+
+            // [Security Fix] Minimal Env & Suicide Pact PID
+            const env = {
+                ...process.env, // Ideally filter this further
+                PORT: port.toString(),
+                GEMINI_API_KEYS: JSON.stringify([apiKey]),
+                PINECONE_API_KEY: pineconeKey,
+                SWARM_DATA_DIR: context.globalStorageUri.fsPath,
+                PYTHONUNBUFFERED: '1',
+                HOST_PID: process.pid.toString() // [Security Fix] Pass PID for suicide pact
+            };
+
+            this.serverProcess = cp.spawn(pythonPath, [scriptPath], { cwd, env });
 
             this.serverProcess.stdout?.on('data', (data) => {
                 const msg = data.toString();
                 this.outputChannel.append(`[INFO] ${msg}`);
-                if (msg.includes("Engine starting on port")) {
+                if (msg.includes("Uvicorn running on")) {
+                     // [Fix] Update Active Port only when actually running
+                     ProcessManager.activePort = port;
                      vscode.window.showInformationMessage(`Gemini Engine Active on Port ${port} 🧠`);
                 }
             });
@@ -92,6 +100,7 @@ export class ProcessManager {
             this.serverProcess.on('error', (err) => {
                 vscode.window.showErrorMessage(`Engine Error: ${err.message}`);
                 this.isRunning = false;
+                ProcessManager.activePort = 0;
             });
 
             this.serverProcess.on('close', (code) => {
@@ -104,7 +113,7 @@ export class ProcessManager {
             return true;
 
         } catch (error: any) {
-            vscode.window.showErrorMessage(`Engine Error: ${error.message}`);
+            vscode.window.showErrorMessage(`Engine Start Failed: ${error.message}`);
             return false;
         }
     }
@@ -116,10 +125,5 @@ export class ProcessManager {
             this.isRunning = false;
             ProcessManager.activePort = 0;
         }
-    }
-
-    public dispose() {
-        this.stop();
-        this.outputChannel.dispose();
     }
 }
