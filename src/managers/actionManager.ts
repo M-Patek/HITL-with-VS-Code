@@ -14,7 +14,7 @@ export class ActionManager {
                 editBuilder.insert(editor.selection.active, code);
             }
         });
-        await vscode.commands.executeCommand('editor.action.formatDocument');
+        // [Optimization] 移除了强制全文格式化的逻辑，避免打乱用户代码
     }
 
     public async previewDiff(document: vscode.TextDocument, newContent: string) {
