@@ -252,4 +252,34 @@ async def start_task(req: TaskRequest, background_tasks: BackgroundTasks):
     config = {"configurable": {"thread_id": thread_id}}
     
     await stream_manager.create_stream(task_id)
-    background_tasks.add_task(run_workflow_background, task_
+    background_tasks.add_task(run_workflow_background, task_id, initial_input, config, req.workspace_root)
+    
+    return {"task_id": task_id, "thread_id": thread_id}
+
+@app.get("/api/stream/{task_id}")
+async def stream_events(task_id: str, request: Request):
+    async def event_generator():
+        queue = stream_manager.active_streams.get(task_id)
+        if not queue:
+            yield f"event: error\ndata: \"Stream not found\"\n\n"
+            yield f"event: finish\ndata: end\n\n"
+            return
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if payload is None:
+                    yield f"event: finish\ndata: end\n\n"
+                    break
+                yield f"event: {payload['type']}\ndata: {json.dumps(payload['data'])}\n\n"
+        except: pass
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+if __name__ == "__main__":
+    print(f"🔥 Gemini VS Code Engine (Ultimate) starting on port {PORT}...")
+    uvicorn.run(app, host=HOST, port=PORT)
