@@ -11,13 +11,14 @@ class MCPToolRegistry:
     def get_system_prompt_addition() -> str:
         """
         生成注入到 System Prompt 的工具说明 (Roo Code 风格 XML)
+        [Phase 2 Upgrade] 新增 apply_diff 工具
         """
         return """
 ## 🛠️ Available Tools (MCP)
 
 你可以使用以下工具来操作 VS Code 环境。请以 XML 格式调用工具。
 
-1. **Write File** (创建或覆盖文件)
+1. **Write File** (创建新文件或全量覆盖小文件)
    <tool_code>
    <tool_name>write_to_file</tool_name>
    <parameters>
@@ -29,7 +30,24 @@ class MCPToolRegistry:
    </parameters>
    </tool_code>
 
-2. **Execute Command** (在终端运行命令)
+2. **Apply Diff** (修改现有大文件 - 推荐)
+   使用精确的 search_block 定位代码块，并替换为 replace_block。
+   <tool_code>
+   <tool_name>apply_diff</tool_name>
+   <parameters>
+     <path>src/utils.py</path>
+     <search_block>
+       def old_function(x):
+           return x + 1
+     </search_block>
+     <replace_block>
+       def old_function(x):
+           return x * 2
+     </replace_block>
+   </parameters>
+   </tool_code>
+
+3. **Execute Command** (在终端运行命令)
    <tool_code>
    <tool_name>execute_command</tool_name>
    <parameters>
@@ -38,21 +56,18 @@ class MCPToolRegistry:
    </tool_code>
 
 **规则:**
+- 优先使用 `apply_diff` 修改现有代码，除非文件很小。
+- `search_block` 必须完全匹配文件中的原始代码（包括空格和缩进）。
 - 每次回复只能包含一个工具调用。
-- 必须严格遵守 XML 格式。
-- 在调用工具前，先简短解释你的意图。
-- 严禁在没有用户批准的情况下破坏性地删除文件。
 """
 
     @staticmethod
     def parse_tool_call(llm_response: str) -> dict:
         """
         解析 LLM 输出中的 XML 工具调用
-        [Robustness Fix] 使用字符串查找而非正则来提取 content，防止代码内容中包含 XML 标签导致截断
         """
         try:
             # 1. 尝试提取最外层 <tool_code>
-            # 使用 DOTALL 模式 (.) 匹配换行符，使用非贪婪匹配 (*?)
             match = re.search(r"<tool_code>\s*(.*?)\s*</tool_code>", llm_response, re.DOTALL | re.IGNORECASE)
             if not match:
                 return None
@@ -74,35 +89,24 @@ class MCPToolRegistry:
             params = {}
             
             if tool_name == "write_to_file":
-                # 提取 path
                 path_match = re.search(r"<path>\s*(.*?)\s*</path>", params_xml, re.DOTALL | re.IGNORECASE)
-                
-                # [Fix] 提取 content
-                # 不要使用正则 (.*?)，因为它遇到第一个 </content> 就会停止。
-                # 如果代码里包含 XML 字符串，就会被截断。
-                # 使用 find 和 rfind 来截取首尾标签之间的所有内容。
-                start_tag = "<content>"
-                end_tag = "</content>"
-                
-                start_idx = params_xml.find(start_tag)
-                end_idx = params_xml.rfind(end_tag)
-                
-                content_str = ""
-                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                    # 提取 content 标签中间的内容
-                    content_str = params_xml[start_idx + len(start_tag) : end_idx]
+                content = MCPToolRegistry._extract_tag_content(params_xml, "content")
                 
                 if path_match:
                     params["path"] = path_match.group(1).strip()
-                    
-                    # 去除首尾的 CDATA 标记（如果模型生成了）
-                    raw_content = content_str
-                    if raw_content.strip().startswith("<![CDATA[") and raw_content.strip().endswith("]]>"):
-                         # 这里需要小心处理空白字符
-                         raw_content = raw_content.strip()[9:-3]
-                    
-                    params["content"] = raw_content.strip()
+                    params["content"] = content
             
+            elif tool_name == "apply_diff":
+                # [Phase 2 Upgrade] 解析 apply_diff 参数
+                path_match = re.search(r"<path>\s*(.*?)\s*</path>", params_xml, re.DOTALL | re.IGNORECASE)
+                search_block = MCPToolRegistry._extract_tag_content(params_xml, "search_block")
+                replace_block = MCPToolRegistry._extract_tag_content(params_xml, "replace_block")
+                
+                if path_match:
+                    params["path"] = path_match.group(1).strip()
+                    params["search_block"] = search_block
+                    params["replace_block"] = replace_block
+
             elif tool_name == "execute_command":
                 cmd_match = re.search(r"<command>\s*(.*?)\s*</command>", params_xml, re.DOTALL | re.IGNORECASE)
                 if cmd_match:
@@ -118,3 +122,20 @@ class MCPToolRegistry:
         except Exception as e:
             print(f"❌ XML Parse Error: {e}")
             return None
+
+    @staticmethod
+    def _extract_tag_content(xml_snippet: str, tag_name: str) -> str:
+        """Helper to extract content between tags robustly"""
+        start_tag = f"<{tag_name}>"
+        end_tag = f"</{tag_name}>"
+        
+        start_idx = xml_snippet.find(start_tag)
+        end_idx = xml_snippet.rfind(end_tag)
+        
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            content = xml_snippet[start_idx + len(start_tag) : end_idx]
+            # Handle CDATA if present
+            if content.strip().startswith("<![CDATA[") and content.strip().endswith("]]>"):
+                content = content.strip()[9:-3]
+            return content.strip() # Strip leading/trailing whitespace usually helps
+        return ""
