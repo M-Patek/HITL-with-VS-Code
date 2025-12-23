@@ -9,6 +9,7 @@ import json
 import logging
 from typing import Dict, Any
 
+# [Optimization] 正确导入 Keys
 from config.keys import GEMINI_API_KEYS, PINECONE_API_KEY, PINECONE_ENVIRONMENT, VECTOR_INDEX_NAME
 from core.rotator import GeminiKeyRotator
 from core.api_models import TaskRequest
@@ -38,14 +39,12 @@ app.add_middleware(
 
 # --- Components ---
 checkpointer = MemorySaver()
-# 简单取第一个 Key
-api_key = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""
-rotator = GeminiKeyRotator("[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)", api_key) # Default base
+# [Optimization] 初始化 Rotator 时传入所有 Key
+rotator = GeminiKeyRotator("[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)", GEMINI_API_KEYS)
 memory = VectorMemoryTool(PINECONE_API_KEY, PINECONE_ENVIRONMENT, VECTOR_INDEX_NAME)
 search = GoogleSearchTool()
 
-# --- Build Graph (VS Code Mode) ---
-# 这将构建只包含 Coding Crew 的图
+# --- Build Graph ---
 workflow_app = build_agent_workflow(rotator, memory, search, checkpointer=checkpointer)
 
 # --- Stream Manager ---
@@ -88,6 +87,14 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
                         "node": "coding_crew"
                     })
                 
+                # [Optimization] Push Image Artifacts (修复图片不可见问题)
+                if ps.artifacts and "image_artifacts" in ps.artifacts:
+                    images = ps.artifacts["image_artifacts"]
+                    # 避免重复发送，实际生产环境可加指纹校验，这里简单起见每次有更新都推
+                    await stream_manager.push_event(task_id, "image_generated", {
+                        "images": images
+                    })
+                
                 # Push Logs
                 if ps.last_error:
                     await stream_manager.push_event(task_id, "error", ps.last_error)
@@ -110,11 +117,10 @@ async def start_task(req: TaskRequest, background_tasks: BackgroundTasks):
     task_id = f"task_{int(time.time())}"
     thread_id = req.thread_id or f"thread_{task_id}"
     
-    # Init State with File Context
     ps = ProjectState.init_from_task(
         user_input=req.user_input, 
         task_id=task_id,
-        file_context=req.file_context # Inject context
+        file_context=req.file_context 
     )
     
     initial_input = {"project_state": ps}
