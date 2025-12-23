@@ -4,10 +4,8 @@ const app = createApp({
     setup() {
         const vscode = acquireVsCodeApi();
         
-        // [New] State Persistence Logic
+        // --- State Management ---
         const oldState = vscode.getState() || { messages: [], serverPort: 8000 };
-
-        // State
         const messages = ref(oldState.messages || []);
         const userInput = ref('');
         const isProcessing = ref(false);
@@ -16,7 +14,14 @@ const app = createApp({
         const chatContainer = ref(null);
         let contextResolver = null;
 
-        // [New] Watch state changes and save
+        // [Roo Code] Cost Dashboard State
+        const costStats = ref({
+            totalCost: 0.0,
+            totalTokens: 0,
+            requests: 0
+        });
+
+        // --- Persistence ---
         watch([messages, serverPort], () => {
             vscode.setState({
                 messages: messages.value,
@@ -24,13 +29,13 @@ const app = createApp({
             });
         }, { deep: true });
 
+        // --- Initialization ---
         onMounted(() => {
             window.addEventListener('message', event => {
                 const message = event.data;
                 switch (message.type) {
                     case 'init':
                         serverPort.value = message.port;
-                        // Don't clear history on init, just append info
                         if (messages.value.length === 0) {
                             addSystemMessage(`🔌 Engine Connected on Port ${serverPort.value}`);
                         }
@@ -46,11 +51,12 @@ const app = createApp({
                         break;
                 }
             });
+            // Signal VS Code that webview is ready to receive port config
             vscode.postMessage({ type: 'webview_ready' });
             scrollToBottom();
         });
 
-        // Methods
+        // --- Helpers ---
         const addSystemMessage = (text) => {
             messages.value.push({ role: 'system', content: text });
             scrollToBottom();
@@ -64,27 +70,75 @@ const app = createApp({
             });
         };
 
+        const formatNumber = (num) => {
+            if (!num) return "0";
+            return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        };
+
+        // --- Actions ---
         const handleTriggerFix = (errorMsg, errorCtx) => {
             const fixPrompt = `Please fix the following error:\n"${errorMsg}"\n\nCode Context:\n${errorCtx}`;
             userInput.value = fixPrompt;
-            // startTask(); // Let user confirm before sending
         };
 
         const fetchContextFromVSCode = () => {
             return new Promise((resolve) => {
                 contextResolver = resolve;
                 vscode.postMessage({ type: 'get_context' });
-                // [Optimization] 增加超时时间到 10s，防止大型项目超时
+                // Timeout safety
                 setTimeout(() => {
                     if (contextResolver) {
-                        resolve({ file_context: null, project_structure: "", diagnostics: "" });
+                        resolve({ file_context: null, project_structure: "", diagnostics: "", workspace_root: null });
                         contextResolver = null;
-                        addSystemMessage("⚠️ Context collection timed out (10s).");
+                        addSystemMessage("⚠️ Context collection timed out.");
                     }
                 }, 10000);
             });
         };
 
+        const insertCode = (code) => {
+            vscode.postMessage({ type: 'insertCode', code: code });
+        };
+
+        const runTest = () => {
+            vscode.postMessage({ type: 'run_terminal', command: 'echo "Hello from Gemini Terminal!"' });
+        };
+
+        // --- Roo Code / Tool Approval Logic ---
+        const approveTool = (msgIdx, toolData) => {
+            // Mark as approved in UI
+            messages.value[msgIdx].approved = true;
+            
+            // Send instruction to VS Code Extension
+            if (toolData.tool === 'write_to_file') {
+                vscode.postMessage({ 
+                    type: 'apply_file_change', 
+                    path: toolData.params.path,
+                    content: toolData.params.content
+                });
+            } else if (toolData.tool === 'execute_command') {
+                vscode.postMessage({ 
+                    type: 'run_terminal', 
+                    command: toolData.params.command
+                });
+            }
+        };
+
+        const rejectTool = (msgIdx) => {
+            messages.value[msgIdx].rejected = true;
+        };
+
+        const viewDiff = (toolData) => {
+            if (toolData.tool === 'write_to_file') {
+                vscode.postMessage({ 
+                    type: 'view_diff', 
+                    path: toolData.params.path,
+                    content: toolData.params.content
+                });
+            }
+        };
+
+        // --- Core Task Logic ---
         const startTask = async () => {
             if (!userInput.value.trim() || isProcessing.value) return;
 
@@ -95,7 +149,7 @@ const app = createApp({
             scrollToBottom();
 
             try {
-                addSystemMessage("👁️ Scanning workspace context...");
+                addSystemMessage("👁️ Scanning workspace & Generating Map...");
                 const contextData = await fetchContextFromVSCode();
                 
                 let finalInput = text;
@@ -107,7 +161,7 @@ const app = createApp({
                     user_input: finalInput,
                     thread_id: `vscode_${Date.now()}`,
                     file_context: contextData.file_context,
-                    project_structure: contextData.project_structure
+                    workspace_root: contextData.workspace_root
                 };
 
                 const response = await fetch(`http://127.0.0.1:${serverPort.value}/api/start_task`, {
@@ -120,6 +174,7 @@ const app = createApp({
                 const data = await response.json();
                 currentTaskId.value = data.task_id;
                 
+                // Start SSE Stream
                 connectSSE(data.task_id);
 
             } catch (e) {
@@ -128,10 +183,12 @@ const app = createApp({
             }
         };
 
+        // --- SSE Stream Handler ---
         const connectSSE = (taskId) => {
             const url = `http://127.0.0.1:${serverPort.value}/api/stream/${taskId}`;
             const evtSource = new EventSource(url);
 
+            // 1. Code Generated (Legacy & Fallback)
             evtSource.addEventListener('code_generated', (e) => {
                 const data = JSON.parse(e.data);
                 messages.value.push({
@@ -143,6 +200,19 @@ const app = createApp({
                 scrollToBottom();
             });
 
+            // 2. Tool Proposal (Roo Code)
+            evtSource.addEventListener('tool_proposal', (e) => {
+                const data = JSON.parse(e.data);
+                messages.value.push({
+                    role: 'ai',
+                    type: 'tool_proposal',
+                    content: data,
+                    label: `Tool Request: ${data.tool}`
+                });
+                scrollToBottom();
+            });
+
+            // 3. Image Generated (Sandbox)
             evtSource.addEventListener('image_generated', (e) => {
                 const data = JSON.parse(e.data);
                 if (data.images && data.images.length > 0) {
@@ -150,24 +220,33 @@ const app = createApp({
                         messages.value.push({
                             role: 'ai',
                             type: 'image',
-                            content: img.data, // base64 string
+                            content: img.data,
                             label: img.filename || 'Generated Image'
                         });
                     });
                     scrollToBottom();
                 }
             });
+
+            // 4. Usage Update (Cost Dashboard)
+            evtSource.addEventListener('usage_update', (e) => {
+                const data = JSON.parse(e.data);
+                costStats.value = {
+                    totalCost: data.total_cost,
+                    totalTokens: data.total_tokens,
+                    requests: data.requests
+                };
+            });
             
+            // 5. Errors
             evtSource.addEventListener('error', (e) => {
                 try {
                     const err = JSON.parse(e.data);
                     addSystemMessage(`⚠️ Engine Error: ${err}`);
-                } catch {
-                     // EventSource error event doesn't always have data
-                     // addSystemMessage(`⚠️ Connection Error`);
-                }
+                } catch {}
             });
 
+            // 6. Finish
             evtSource.addEventListener('finish', () => {
                 evtSource.close();
                 isProcessing.value = false;
@@ -180,17 +259,11 @@ const app = createApp({
             };
         };
 
-        const insertCode = (code) => {
-            vscode.postMessage({ type: 'insertCode', code: code });
-        };
-
-        const runTest = () => {
-            vscode.postMessage({ type: 'run_terminal', command: 'echo "Hello from Gemini Terminal!"' });
-        };
-
         return {
             messages, userInput, isProcessing, chatContainer,
-            startTask, insertCode, runTest
+            costStats, formatNumber,
+            startTask, insertCode, runTest,
+            approveTool, rejectTool, viewDiff
         };
     }
 });
