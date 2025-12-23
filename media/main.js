@@ -27,7 +27,7 @@ const app = createApp({
                             contextResolver = null;
                         }
                         break;
-                    case 'trigger_fix': // [New] 处理自动修复请求
+                    case 'trigger_fix': 
                         handleTriggerFix(message.error, message.context);
                         break;
                 }
@@ -49,12 +49,10 @@ const app = createApp({
             });
         };
 
-        // [New] 自动触发修复
         const handleTriggerFix = (errorMsg, errorCtx) => {
-            // 构造一个自动化的 Prompt
             const fixPrompt = `Please fix the following error:\n"${errorMsg}"\n\nCode Context:\n${errorCtx}`;
             userInput.value = fixPrompt;
-            startTask(); // 自动发射！
+            startTask(); 
         };
 
         const fetchContextFromVSCode = () => {
@@ -79,7 +77,6 @@ const app = createApp({
             isProcessing.value = true;
 
             try {
-                // 1. 获取上下文
                 addSystemMessage("👁️ Scanning workspace context...");
                 const contextData = await fetchContextFromVSCode();
                 
@@ -88,7 +85,6 @@ const app = createApp({
                     finalInput += `\n\n[System Detected Errors]:\n${contextData.diagnostics}`;
                 }
 
-                // 2. Call Python API
                 const payload = { 
                     user_input: finalInput,
                     thread_id: `vscode_${Date.now()}`,
@@ -128,6 +124,22 @@ const app = createApp({
                 });
                 scrollToBottom();
             });
+
+            // [Optimization] 图片显示支持
+            evtSource.addEventListener('image_generated', (e) => {
+                const data = JSON.parse(e.data);
+                if (data.images && data.images.length > 0) {
+                    data.images.forEach(img => {
+                        messages.value.push({
+                            role: 'ai',
+                            type: 'image',
+                            content: img.data, // base64 string
+                            label: img.filename || 'Generated Image'
+                        });
+                    });
+                    scrollToBottom();
+                }
+            });
             
             evtSource.addEventListener('error', (e) => {
                 const err = JSON.parse(e.data);
@@ -150,7 +162,6 @@ const app = createApp({
             vscode.postMessage({ type: 'insertCode', code: code });
         };
 
-        // [New] 可以在界面上增加一个按钮调用 runInTerminal (Demo)
         const runTest = () => {
             vscode.postMessage({ type: 'run_terminal', command: 'echo "Hello from Gemini Terminal!"' });
         };
