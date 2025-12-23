@@ -5,11 +5,19 @@ import * as os from 'os';
 import { GitManager } from './gitManager';
 
 export class ActionManager {
+    private static _instance: ActionManager;
     private static _terminal: vscode.Terminal | undefined;
     private _gitManager: GitManager;
 
-    constructor() {
+    private constructor() {
         this._gitManager = new GitManager();
+    }
+
+    public static getInstance(): ActionManager {
+        if (!ActionManager._instance) {
+            ActionManager._instance = new ActionManager();
+        }
+        return ActionManager._instance;
     }
 
     private async ensureCheckpoint(context: string) {
@@ -29,10 +37,6 @@ export class ActionManager {
         });
     }
 
-    /**
-     * [Roo Code Soul] 交互式 Diff 预览
-     * 对比 "当前文件" (Left) 与 "AI 建议" (Right)
-     */
     public async previewFileDiff(relativePath: string, newContent: string) {
         if (!vscode.workspace.workspaceFolders) {
             vscode.window.showErrorMessage('No workspace open for diff!');
@@ -41,35 +45,35 @@ export class ActionManager {
 
         const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
         const targetPath = path.join(rootPath, relativePath);
-        const fileName = path.basename(relativePath);
+        
+        // [Security] Path Traversal Check
+        if (!targetPath.startsWith(rootPath)) {
+            vscode.window.showErrorMessage('❌ Security Alert: Illegal path access detected!');
+            return;
+        }
 
-        // 1. 创建右侧（新内容）的临时文件
-        // 使用随机后缀避免冲突
+        const fileName = path.basename(relativePath);
         const tempNewUri = vscode.Uri.file(path.join(os.tmpdir(), `gemini_new_${Date.now()}_${fileName}`));
         await fs.promises.writeFile(tempNewUri.fsPath, newContent);
 
-        // 2. 确定左侧（旧内容）
         let leftUri = vscode.Uri.file(targetPath);
         let title = `${fileName} (Current) ↔ (Gemini Proposal)`;
 
         try {
-            // 检查文件是否存在
             await fs.promises.access(targetPath);
         } catch {
-            // 文件不存在（是新建文件），左侧展示一个空的临时文件
             const tempEmptyUri = vscode.Uri.file(path.join(os.tmpdir(), `gemini_empty_${Date.now()}_${fileName}`));
             await fs.promises.writeFile(tempEmptyUri.fsPath, "");
             leftUri = tempEmptyUri;
             title = `(New File) ${fileName} ↔ (Gemini Proposal)`;
         }
 
-        // 3. 打开 Diff 视图
         await vscode.commands.executeCommand(
             'vscode.diff',
             leftUri,
             tempNewUri,
             title,
-            { preview: true } // 在预览标签页打开
+            { preview: true }
         );
     }
 
@@ -99,10 +103,16 @@ export class ActionManager {
             return;
         }
 
-        await this.ensureCheckpoint(`Update ${relativePath}`);
-
         const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
         const fullPath = path.join(rootPath, relativePath);
+
+        // [Security] Path Traversal Check
+        if (!fullPath.startsWith(rootPath)) {
+            vscode.window.showErrorMessage('❌ Security Alert: Illegal path access detected!');
+            return;
+        }
+
+        await this.ensureCheckpoint(`Update ${relativePath}`);
 
         try {
             const dir = path.dirname(fullPath);
@@ -112,7 +122,6 @@ export class ActionManager {
             
             vscode.window.showInformationMessage(`✅ File updated: ${relativePath}`);
             
-            // 写入后尝试打开文件
             try {
                 const doc = await vscode.workspace.openTextDocument(fullPath);
                 await vscode.window.showTextDocument(doc);
