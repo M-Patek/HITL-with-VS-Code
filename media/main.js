@@ -4,38 +4,37 @@ const app = createApp({
     setup() {
         const vscode = acquireVsCodeApi();
         
-        // --- State ---
-        const oldState = vscode.getState() || { messages: [], serverPort: 0 };
+        const oldState = vscode.getState() || { messages: [], serverPort: 0, activeTaskId: null };
         const messages = ref(oldState.messages || []);
         const userInput = ref('');
         const isProcessing = ref(false);
         const serverPort = ref(oldState.serverPort || 0); 
-        const isSandboxActive = ref(true); // Default to true, update via msg
+        const isSandboxActive = ref(true);
+        const activeTaskId = ref(oldState.activeTaskId || null); // [Reconnect] Track ID
         const chatContainer = ref(null);
         let contextResolver = null;
+        const costStats = ref({ totalCost: 0.0, totalTokens: 0, requests: 0 });
 
-        // Cost Dashboard
-        const costStats = ref({
-            totalCost: 0.0,
-            totalTokens: 0,
-            requests: 0
-        });
-
-        // --- Persistence ---
-        watch([messages, serverPort], () => {
+        // Persistence
+        watch([messages, serverPort, activeTaskId], () => {
             vscode.setState({
                 messages: messages.value,
-                serverPort: serverPort.value
+                serverPort: serverPort.value,
+                activeTaskId: activeTaskId.value
             });
         }, { deep: true });
 
-        // --- Lifecycle ---
         onMounted(() => {
             window.addEventListener('message', event => {
                 const message = event.data;
                 switch (message.type) {
                     case 'init':
                         serverPort.value = message.port;
+                        // [Reconnect] Try reconnect if we have an active task
+                        if (activeTaskId.value && serverPort.value) {
+                            console.log("🔄 Attempting Reconnect:", activeTaskId.value);
+                            connectSSE(activeTaskId.value);
+                        }
                         break;
                     case 'context_response':
                         if (contextResolver) {
@@ -52,12 +51,6 @@ const app = createApp({
             scrollToBottom();
         });
 
-        // --- Helpers ---
-        const addSystemMessage = (text) => {
-            messages.value.push({ role: 'system', content: text, type: 'text' });
-            scrollToBottom();
-        };
-
         const scrollToBottom = () => {
             nextTick(() => {
                 if (chatContainer.value) {
@@ -66,25 +59,15 @@ const app = createApp({
             });
         };
 
-        const formatNumber = (num) => {
-            if (!num) return "0";
-            return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-        };
+        const formatNumber = (num) => num ? num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "0";
 
-        // --- Core Interactions ---
         const handleTriggerFix = (errorMsg, errorCtx) => {
             userInput.value = `Fix this error:\n"${errorMsg}"`;
-            startTask(); // Auto-start optionally? Let's just fill input for now
         };
 
-        const insertCode = (code) => {
-            vscode.postMessage({ type: 'insertCode', code: code });
-        };
-
-        const runTest = () => {
-            vscode.postMessage({ type: 'run_terminal', command: 'echo "Gemini Swarm Connection Test 🐱"' });
-        };
-
+        const insertCode = (code) => vscode.postMessage({ type: 'insertCode', code: code });
+        const runTest = () => vscode.postMessage({ type: 'run_terminal', command: 'echo "Gemini Swarm Test"' });
+        
         const viewDiff = (toolData) => {
             if (toolData.tool === 'write_to_file') {
                 vscode.postMessage({ 
@@ -98,22 +81,13 @@ const app = createApp({
         const approveTool = (msgIdx, toolData) => {
             messages.value[msgIdx].approved = true;
             if (toolData.tool === 'write_to_file') {
-                vscode.postMessage({ 
-                    type: 'apply_file_change', 
-                    path: toolData.params.path,
-                    content: toolData.params.content
-                });
+                vscode.postMessage({ type: 'apply_file_change', path: toolData.params.path, content: toolData.params.content });
             } else if (toolData.tool === 'execute_command') {
-                vscode.postMessage({ 
-                    type: 'run_terminal', 
-                    command: toolData.params.command
-                });
+                vscode.postMessage({ type: 'run_terminal', command: toolData.params.command });
             }
         };
 
-        const rejectTool = (msgIdx) => {
-            messages.value[msgIdx].rejected = true;
-        };
+        const rejectTool = (msgIdx) => messages.value[msgIdx].rejected = true;
 
         const fetchContextFromVSCode = () => {
             return new Promise((resolve) => {
@@ -128,7 +102,6 @@ const app = createApp({
             });
         };
 
-        // --- Task Logic ---
         const startTask = async () => {
             if (!userInput.value.trim() || isProcessing.value) return;
 
@@ -140,10 +113,9 @@ const app = createApp({
 
             try {
                 const contextData = await fetchContextFromVSCode();
-                
                 let finalInput = text;
                 if (contextData.diagnostics) {
-                    finalInput += `\n\n[System Detected Errors]:\n${contextData.diagnostics}`;
+                    finalInput += `\n\n[Errors]:\n${contextData.diagnostics}`;
                 }
 
                 const payload = { 
@@ -162,32 +134,27 @@ const app = createApp({
                 if (!response.ok) throw new Error('API Request Failed');
                 const data = await response.json();
                 
+                activeTaskId.value = data.task_id; // [Reconnect] Save ID
                 connectSSE(data.task_id);
 
             } catch (e) {
-                addSystemMessage(`❌ Error: ${e.message}`);
+                messages.value.push({ role: 'system', content: `❌ Error: ${e.message}`, type: 'text' });
                 isProcessing.value = false;
             }
         };
 
         const connectSSE = (taskId) => {
+            isProcessing.value = true;
             const url = `http://127.0.0.1:${serverPort.value}/api/stream/${taskId}`;
             const evtSource = new EventSource(url);
 
             const handleEvent = (data, type, label) => {
-                 messages.value.push({
-                    role: 'ai',
-                    type: type,
-                    content: data,
-                    label: label
-                });
-                scrollToBottom();
+                 messages.value.push({ role: 'ai', type: type, content: data, label: label });
+                 scrollToBottom();
             };
 
-            evtSource.addEventListener('code_generated', (e) => {
-                handleEvent(JSON.parse(e.data).content, 'code', 'Generated Code');
-            });
-
+            evtSource.addEventListener('code_generated', (e) => handleEvent(JSON.parse(e.data).content, 'code', 'Code'));
+            
             evtSource.addEventListener('tool_proposal', (e) => {
                 const d = JSON.parse(e.data);
                 handleEvent(d, 'tool_proposal', `Request: ${d.tool}`);
@@ -195,24 +162,19 @@ const app = createApp({
 
             evtSource.addEventListener('image_generated', (e) => {
                 const d = JSON.parse(e.data);
-                if (d.images) {
-                    d.images.forEach(img => {
-                        handleEvent(img.data, 'image', img.filename);
-                    });
-                }
+                if (d.images) d.images.forEach(img => handleEvent(img.data, 'image', img.filename));
             });
 
-            evtSource.addEventListener('usage_update', (e) => {
-                const data = JSON.parse(e.data);
-                costStats.value = data;
-            });
+            evtSource.addEventListener('usage_update', (e) => costStats.value = JSON.parse(e.data));
             
             evtSource.addEventListener('finish', () => {
                 evtSource.close();
                 isProcessing.value = false;
+                activeTaskId.value = null; // [Reconnect] Clear ID on finish
             });
             
             evtSource.onerror = () => {
+                // Don't clear activeTaskId here, allow retry later
                 evtSource.close();
                 isProcessing.value = false;
             };
