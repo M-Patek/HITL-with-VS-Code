@@ -1,115 +1,77 @@
-import asyncio
+import google.generativeai as genai
+from google.api_core import exceptions
 import random
+import time
 import logging
-import httpx
-from typing import List, Dict, Any, Optional, Literal
-from config.keys import TIER_1_FAST, TIER_2_PRO
+from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger("GeminiRotator")
 
 class GeminiKeyRotator:
-    # [Optimization] 接收 Key 列表
-    def __init__(self, base_url: str, api_keys: List[str]):
-        self.base_url = base_url.rstrip("/")
-        self.api_keys = api_keys if api_keys else [""]
-        self.current_key_index = 0
-        self.is_gateway = "googleapis.com" not in self.base_url
-        
-        if not self.api_keys or self.api_keys[0] == "":
-            logger.warning("⚠️ No API Keys provided to Rotator!")
+    def __init__(self, base_url: str, keys: List[str]):
+        self.keys = keys
+        self.current_index = 0
+        self.base_url = base_url
 
-    def _get_current_key(self) -> str:
-        if not self.api_keys: return ""
-        return self.api_keys[self.current_key_index]
+    def _get_next_key(self):
+        key = self.keys[self.current_index]
+        self.current_index = (self.current_index + 1) % len(self.keys)
+        return key
 
-    def _rotate_key(self):
-        # [Optimization] 简单的轮询切换
-        if not self.api_keys: return
-        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-        logger.info(f"🔄 Switched to API Key #{self.current_key_index}")
-
-    def _get_model_by_complexity(self, complexity: str) -> str:
-        if complexity == "simple":
-            return TIER_1_FAST
-        elif complexity == "complex":
-            return TIER_2_PRO
-        else:
-            return TIER_2_PRO
-
-    async def call_gemini_with_rotation(
-        self,
-        model_name: str,
-        contents: List[Dict[str, Any]],
-        system_instruction: str = "",
-        response_schema: Optional[Any] = None,
-        complexity: Literal["simple", "complex"] = "complex",
-        semantic_cache_tool: Optional[Any] = None
-    ) -> str:
-        target_model = model_name
-        if complexity:
-            target_model = self._get_model_by_complexity(complexity)
-            
-        headers = {"Content-Type": "application/json"}
-        
-        payload = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": 0.7 if complexity == "complex" else 0.3, 
-            }
-        }
-
-        if system_instruction:
-            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-
-        if response_schema:
-            payload["generationConfig"]["responseMimeType"] = "application/json"
-            if hasattr(response_schema, "model_json_schema"):
-                payload["generationConfig"]["responseSchema"] = response_schema.model_json_schema()
-            elif isinstance(response_schema, dict):
-                payload["generationConfig"]["responseSchema"] = response_schema
-
-        retries = 3
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            for attempt in range(retries):
-                current_key = self._get_current_key()
+    def call_gemini_with_rotation(
+        self, 
+        model_name: str, 
+        contents: List[Dict[str, Any]], 
+        system_instruction: str = None,
+        complexity: str = "simple",
+        max_retries: int = 3
+    ) -> Tuple[str, Dict[str, int]]: # [Changed] Return Tuple
+        """
+        调用 Gemini API 并自动轮询 Key
+        Returns: (generated_text, usage_metadata)
+        """
+        retries = 0
+        while retries < max_retries:
+            key = self._get_next_key()
+            try:
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=system_instruction
+                )
                 
-                # 动态构建 URL
-                if self.is_gateway:
-                    url = f"{self.base_url}/v1/chat/completions"
-                    headers["Authorization"] = f"Bearer {current_key}"
-                    payload["model"] = target_model
-                else:
-                    url = f"{self.base_url}/v1beta/models/{target_model}:generateContent?key={current_key}"
+                # 配置生成参数
+                generation_config = genai.types.GenerationConfig(
+                    temperature=0.2 if complexity == "complex" else 0.1,
+                    max_output_tokens=8192
+                )
 
-                try:
-                    response = await client.post(url, headers=headers, json=payload)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        candidates = data.get("candidates", [])
-                        if candidates:
-                            content = candidates[0].get("content", {})
-                            parts = content.get("parts", [])
-                            if parts:
-                                return parts[0].get("text", "")
-                        return "" 
-                    
-                    # [Optimization] 遇到限流或服务错误时切换 Key
-                    elif response.status_code in [429, 500, 503]:
-                        logger.warning(f"API Error {response.status_code}. Rotating key and retrying...")
-                        self._rotate_key()
-                        
-                        # [Critical Fix] 修复指数退避算法
-                        # Old: 1 ** attempt (Always 1)
-                        # New: 2 ** attempt (1, 2, 4...)
-                        wait_time = min(30, 2 ** attempt) 
-                        await asyncio.sleep(wait_time)
-                    else:
-                        logger.error(f"API Failed: {response.text}")
-                        break
-                        
-                except Exception as e:
-                    logger.error(f"Request failed: {e}")
-                    await asyncio.sleep(1)
+                response = model.generate_content(
+                    contents,
+                    generation_config=generation_config
+                )
                 
-        return ""
+                # 提取 Usage Metadata
+                usage = {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                }
+                
+                if hasattr(response, 'usage_metadata'):
+                    usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
+                    usage["completion_tokens"] = response.usage_metadata.candidates_token_count
+                    usage["total_tokens"] = response.usage_metadata.total_token_count
+                
+                return response.text, usage
+
+            except exceptions.ResourceExhausted:
+                logger.warning(f"Key {key[:8]}... exhausted. Rotating.")
+                retries += 1
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Gemini API Error: {e}")
+                retries += 1
+                time.sleep(2 * retries)
+        
+        return "", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
