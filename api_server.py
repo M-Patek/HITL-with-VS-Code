@@ -13,14 +13,16 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 
+# 假设这些模块都在项目中存在
 from config.keys import GEMINI_API_KEYS
 from core.models import GeminiModelConfig
 from core.sandbox_manager import cleanup_all_sandboxes
+# 引入 Graph 创建函数
 from agents.crews.coding_crew.graph import create_coding_crew
 from agents.crews.coding_crew.state import CodingCrewState, ProjectState
 
 # [Security] Configure Logging
-# Use WARNING level by default for production privacy
+# Use WARNING level by default for production privacy to avoid leaking prompts/keys
 LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING")
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
@@ -62,7 +64,7 @@ app = FastAPI(lifespan=lifespan)
 # CORS - Allow localhost for VS Code Webview
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In strict mode, this should be restricted, but VS Code webviews have dynamic origins
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -139,25 +141,23 @@ async def start_task(req: TaskRequest, background_tasks: BackgroundTasks):
 
     # [Security] Path Trust Validation
     # Prefer the environment variable passed by VS Code over the request body
-    # to prevent arbitrary file read attacks via path manipulation.
     target_root = TRUSTED_WORKSPACE_ROOT if TRUSTED_WORKSPACE_ROOT else req.workspace_root
     
     if not target_root or not os.path.exists(target_root):
         logger.error(f"Invalid workspace root: {target_root}")
-        # In a real scenario, we might want to return an error, but for fallback support:
         if not TRUSTED_WORKSPACE_ROOT: 
-             # Only if Env is missing (e.g. manual debug), allow request param but warn
              logger.warning("⚠️ Using untrusted workspace root from request body!")
         else:
-             target_root = None # Safety fallback
+             # If env is present but path invalid, block it.
+             raise HTTPException(status_code=400, detail="Invalid trusted workspace root.")
 
     task_id = req.task_id or f"task_{uuid.uuid4().hex}"
     logger.info(f"🏁 Starting Task {task_id}")
 
-    # Initialize State
+    # Initialize Configuration
     config = GeminiModelConfig(
         api_keys=GEMINI_API_KEYS,
-        model_name="gemini-1.5-flash-latest", # Fast model for planning
+        model_name="gemini-1.5-flash-latest",
         temperature=0.2
     )
     
@@ -228,10 +228,12 @@ async def run_workflow_background(task_id: str, inputs: Dict, config: GeminiMode
                     "details": f"Node {key} finished execution."
                 })
                 
-                # Check for tool outputs or specific state changes if needed
-                if key == "executor_node":
-                     # Example: Send execution logs
-                     pass
+                # Check for tool outputs and stream logs if available
+                if key == "executor_node" and "execution_output" in value:
+                     await push_update({
+                         "type": "log",
+                         "content": value["execution_output"]
+                     })
 
         await push_update({"type": "complete", "status": "success"})
 
@@ -247,16 +249,12 @@ async def stream_task_events(task_id: str, request: Request):
     SSE Endpoint for real-time updates.
     """
     if task_id not in task_event_queues:
-        # It's possible the task hasn't started yet or invalid ID
-        # Wait a bit or return 404. For simplicity, we wait.
-        # Check concurrency limit, if wait too long, 404.
         return JSONResponse(status_code=404, content={"detail": "Task not found"})
 
     async def event_generator():
         queue = task_event_queues[task_id]
         try:
             while True:
-                # Check if client disconnected
                 if await request.is_disconnected():
                     break
                     
@@ -264,14 +262,12 @@ async def stream_task_events(task_id: str, request: Request):
                 if data:
                     yield f"data: {data}\n\n"
                     
-                    # Check for close signal
                     msg = json.loads(data)
                     if msg.get("type") == "close":
                         break
         except asyncio.CancelledError:
             pass
         finally:
-            # Cleanup queue
             task_event_queues.pop(task_id, None)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
