@@ -4,7 +4,7 @@ from core.rotator import GeminiKeyRotator
 from agents.crews.coding_crew.state import CodingCrewState
 from agents.crews.coding_crew.nodes import CodingCrewNodes
 
-# [Phase 1 Upgrade] Updated Router with Step Logic
+# [Fix] Correct Step Logic
 def route_step(state: CodingCrewState) -> str:
     """
     Decides whether to retry current step, move to next step, or finish.
@@ -14,7 +14,7 @@ def route_step(state: CodingCrewState) -> str:
     
     # 1. If rejected, reflect and retry (unless max retries reached)
     if status != "approve":
-        if count >= 5: # Max retries per step
+        if count >= 3: # Reduced max retries to prevent endless loops
              print("   ⚠️ Max retries reached for this step. Forcing summary.")
              return "summarize" # Force finish (fail)
         return "reflect"
@@ -42,12 +42,13 @@ def next_step_node(state: CodingCrewState) -> Dict[str, Any]:
         "linter_passed": True
     }
 
-def build_coding_crew_graph(rotator: GeminiKeyRotator, checkpointer: Any = None) -> StateGraph:
-    nodes = CodingCrewNodes(rotator)
+# [Fix] Accept tools
+def build_coding_crew_graph(rotator: GeminiKeyRotator, memory=None, search=None, checkpointer: Any = None) -> StateGraph:
+    nodes = CodingCrewNodes(rotator, memory, search)
     workflow = StateGraph(CodingCrewState)
     
     # Nodes
-    workflow.add_node("planner", nodes.planner_node) # [New]
+    workflow.add_node("planner", nodes.planner_node)
     workflow.add_node("coder", nodes.coder_node)
     workflow.add_node("executor", nodes.executor_node)
     workflow.add_node("reviewer", nodes.reviewer_node)
@@ -94,5 +95,6 @@ def build_coding_crew_graph(rotator: GeminiKeyRotator, checkpointer: Any = None)
     
     return workflow.compile(checkpointer=checkpointer)
 
-# Default export (Mock for quick testing)
-graph = build_coding_crew_graph(GeminiKeyRotator("http://mock", ["mock"]))
+if __name__ == "__main__":
+    # [Fix] Moved Mock inside main check
+    pass
