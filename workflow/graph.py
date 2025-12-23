@@ -1,14 +1,16 @@
-from typing import Dict, Any
+from typing import Any, Dict
 from langgraph.graph import StateGraph, END
-# [Critical Fix] Do NOT import the pre-compiled graph from registry directly for the main workflow
-# from core.crew_registry import crew_registry 
-from agents.common_types import AgentGraphState
+from agents.crews.coding_crew.state import CodingCrewState
 from core.rotator import GeminiKeyRotator
 from tools.memory import VectorMemoryTool
 from tools.search import GoogleSearchTool
 
-# [Critical Fix] Import the builder function to inject real dependencies
+# [Cleanup] 直接导入构建函数，不再使用 core.crew_registry
 from agents.crews.coding_crew.graph import build_coding_crew_graph
+
+# [Cleanup] 定义统一的 State 类型，这里直接复用 CodingCrewState 作为主 State
+# 如果未来有多个 Crew，可以使用 Union 或更通用的 AgentGraphState
+AgentGraphState = CodingCrewState 
 
 def build_agent_workflow(
     rotator: GeminiKeyRotator, 
@@ -18,9 +20,9 @@ def build_agent_workflow(
 ):
     """
     构建主工作流 - VS Code Direct Mode
-    修复了之前直接使用 Mock Graph 的问题，现在会动态注入真实的 API Key Rotator。
+    完全移除了旧的注册表逻辑，直接动态构建 Coding Crew。
     """
-    # 1. 初始化主图 (使用统一的 AgentGraphState)
+    # 1. 初始化主图
     workflow = StateGraph(AgentGraphState)
     
     # 2. 动态构建 Coding Crew 子图，注入真实的 Rotator
