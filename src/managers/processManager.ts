@@ -7,45 +7,33 @@ export class ProcessManager {
     private serverProcess: cp.ChildProcess | undefined;
     private outputChannel: vscode.OutputChannel;
     private isRunning: boolean = false;
+    
+    // [Phase 3 Upgrade] Expose active port for other providers (e.g., Completion)
+    private static activePort: number = 0;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel("Gemini Swarm Engine");
     }
 
-    // 自动查找可用端口
+    public static getActivePort(): number {
+        return ProcessManager.activePort;
+    }
+
     private async findAvailablePort(startPort: number): Promise<number> {
         return new Promise((resolve, reject) => {
             const server = net.createServer();
             server.unref();
-            server.on('error', () => {
-                // 端口被占用，尝试下一个
-                resolve(this.findAvailablePort(startPort + 1));
-            });
+            server.on('error', () => resolve(this.findAvailablePort(startPort + 1)));
             server.listen(startPort, () => {
-                server.close(() => {
-                    resolve(startPort);
-                });
+                server.close(() => resolve(startPort));
             });
         });
     }
 
-    // [Optimization] 智能检测 Python 解释器
     private async resolvePythonPath(configPath: string): Promise<string> {
-        // 如果用户明确指定了路径，直接使用
-        if (configPath && configPath !== 'python') {
-            return configPath;
-        }
-
-        // 尝试探测 python3
+        if (configPath && configPath !== 'python') return configPath;
         return new Promise((resolve) => {
-            cp.exec('python3 --version', (err) => {
-                if (!err) {
-                    resolve('python3');
-                } else {
-                    // Fallback to 'python' (可能是 Python 2 或 3，视系统而定)
-                    resolve('python');
-                }
-            });
+            cp.exec('python3 --version', (err) => resolve(err ? 'python' : 'python3'));
         });
     }
 
@@ -66,30 +54,17 @@ export class ProcessManager {
             return false;
         }
 
-        // [Performance Fix] 智能解析 Python 路径
         const pythonPath = await this.resolvePythonPath(userPythonPath);
-        
-        // [Optimization] 自动检测端口，但不再写入 settings.json 造成副作用
         const port = await this.findAvailablePort(configuredPort);
-        
-        // 即使端口变了，我们也不更新配置，而是只在当前会话中使用新端口
-        // 前端 Webview 会通过 'init' 消息接收这个动态端口
-        if (port !== configuredPort) {
-            this.outputChannel.appendLine(`[Info] Port ${configuredPort} is busy. Switched to dynamic port ${port}.`);
-        }
+        ProcessManager.activePort = port; // [Phase 3 Upgrade] Store port
 
         const scriptPath = context.asAbsolutePath(path.join('python_backend', 'api_server.py'));
         const cwd = path.dirname(scriptPath);
 
         this.outputChannel.appendLine(`[Boot] Starting Engine at port ${port}...`);
-        this.outputChannel.appendLine(`[Boot] Python: ${pythonPath}`);
-        this.outputChannel.appendLine(`[Boot] Script: ${scriptPath}`);
 
         try {
-            // [Security Fix] 使用 JSON.stringify 安全地序列化 API Key 列表
             const safeApiKeys = JSON.stringify([apiKey]);
-
-            // [Persistence] 传递数据目录路径
             const dataDir = context.globalStorageUri.fsPath;
 
             this.serverProcess = cp.spawn(pythonPath, [scriptPath], {
@@ -99,7 +74,7 @@ export class ProcessManager {
                     PORT: port.toString(),
                     GEMINI_API_KEYS: safeApiKeys,
                     PINECONE_API_KEY: pineconeKey,
-                    SWARM_DATA_DIR: dataDir, // 传入持久化路径
+                    SWARM_DATA_DIR: dataDir,
                     PYTHONUNBUFFERED: '1'
                 }
             });
@@ -112,20 +87,17 @@ export class ProcessManager {
                 }
             });
 
-            this.serverProcess.stderr?.on('data', (data) => {
-                this.outputChannel.append(`[ERR] ${data.toString()}`);
-            });
+            this.serverProcess.stderr?.on('data', (data) => this.outputChannel.append(`[ERR] ${data}`));
 
             this.serverProcess.on('error', (err) => {
-                this.outputChannel.appendLine(`[FATAL] Failed to spawn: ${err.message}`);
-                vscode.window.showErrorMessage(`Failed to start Python engine: ${err.message}`);
+                vscode.window.showErrorMessage(`Engine Error: ${err.message}`);
                 this.isRunning = false;
             });
 
             this.serverProcess.on('close', (code) => {
                 this.outputChannel.appendLine(`[STOP] Engine exited with code ${code}`);
                 this.isRunning = false;
-                this.serverProcess = undefined;
+                ProcessManager.activePort = 0;
             });
 
             this.isRunning = true;
@@ -139,11 +111,10 @@ export class ProcessManager {
 
     public stop() {
         if (this.serverProcess) {
-            this.outputChannel.appendLine('[Command] Stopping Engine...');
             this.serverProcess.kill();
             this.serverProcess = undefined;
             this.isRunning = false;
-            vscode.window.showInformationMessage('Gemini Engine Stopped. 💤');
+            ProcessManager.activePort = 0;
         }
     }
 
