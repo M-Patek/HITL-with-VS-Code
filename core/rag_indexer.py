@@ -33,7 +33,6 @@ class WorkspaceIndexer:
         
         for root, dirs, files in os.walk(root_path):
             # [Fix] Security: Skip hidden directories (starting with .)
-            # This prevents indexing .git internals, .env folders, etc.
             dirs[:] = [d for d in dirs if d not in self.default_ignore_dirs and not d.startswith('.')]
             
             for file in files:
@@ -44,7 +43,6 @@ class WorkspaceIndexer:
                 file_path = os.path.join(root, file)
                 
                 # [Fix] Security: Explicitly check for Symlinks
-                # Prevents arbitrary file read if a symlink points outside the workspace (e.g., to /etc/passwd)
                 if os.path.islink(file_path):
                     logger.debug(f"Skipping symlink: {file_path}")
                     continue
@@ -55,13 +53,12 @@ class WorkspaceIndexer:
                     continue
                 
                 try:
-                    # Basic binary check
+                    # Basic binary check & Size limit
+                    if os.path.getsize(file_path) > 100000: # 100KB limit
+                        continue
+
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
-                        
-                    # Simple heuristic to skip large files or minified code
-                    if len(content) > 100000: # 100KB limit
-                        continue
 
                     documents.append({
                         "path": rel_path,
@@ -77,6 +74,5 @@ class WorkspaceIndexer:
     def index(self, root_path: str):
         logger.info(f"Indexing workspace: {root_path}")
         docs = self._index_workspace_sync(root_path)
-        # In a real impl, we would chunk docs and generate embeddings here.
         logger.info(f"Indexed {len(docs)} documents.")
         return docs
