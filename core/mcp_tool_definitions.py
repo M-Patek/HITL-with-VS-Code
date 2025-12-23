@@ -1,4 +1,5 @@
 from typing import List, Dict, Any
+import re
 
 class MCPToolDefinitions:
     """
@@ -43,26 +44,18 @@ class MCPToolDefinitions:
                     "required": ["command"]
                 }
             },
-             # ... other tools ...
+            # Add other tools as per original implementation
         ]
 
     @staticmethod
     def parse_tool_calls(llm_output: str) -> List[Dict[str, Any]]:
         """
         Parses XML-like tool calls from LLM output.
-        Format:
-        <tool_code>
-        <name>tool_name</name>
-        <parameters>
-            <param_name>value</param_name>
-        </parameters>
-        </tool_code>
+        Robustly handles multiple tool calls.
         """
         tool_calls = []
-        # Simple parser logic (robustness improved below)
-        # This is a simplified example, assuming the LLM follows the structure.
         
-        # Check for <tool_code> blocks
+        # Split by the tool_code tag
         snippets = llm_output.split("<tool_code>")
         for snippet in snippets[1:]:
             end_idx = snippet.find("</tool_code>")
@@ -75,9 +68,8 @@ class MCPToolDefinitions:
             
             parameters = {}
             if params_block:
-                # Basic parsing for params (can be improved with regex or true XML parser)
-                # Assuming simple flat parameters for now
-                import re
+                # Use Regex to extract all parameter tags
+                # Matches <key>value</key> patterns inside parameters block
                 param_matches = re.findall(r'<(\w+)>(.*?)</\1>', params_block, re.DOTALL)
                 for p_name, p_val in param_matches:
                     parameters[p_name] = p_val.strip()
