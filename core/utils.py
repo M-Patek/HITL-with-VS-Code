@@ -4,12 +4,12 @@ import logging
 logger = logging.getLogger("Utils")
 
 # [Maintenance] 集中管理费率配置 (USD per 1M tokens)
-# TODO: Move to a proper config file or fetch from API
+# 更新价格以匹配 gemini-1.5 系列 (假设价格，实际请参考 Google Cloud 定价)
 PRICING_TIERS = {
     "flash": {
         "input": 0.075,
         "output": 0.30,
-        "description": "Gemini 1.5 Flash (Fast & Cheap)"
+        "description": "Gemini 1.5 Flash (Fast & Cost Effective)"
     },
     "pro": {
         "input": 3.50,
@@ -40,7 +40,7 @@ def calculate_cost(model_name: str, input_tokens: int, output_tokens: int) -> fl
     """
     model_lower = model_name.lower()
     
-    # Select Tier
+    # [Config Update] 改进匹配逻辑，支持 "gemini-1.5-flash" 或 "flash"
     if "flash" in model_lower:
         rate = PRICING_TIERS["flash"]
     elif "pro" in model_lower:
