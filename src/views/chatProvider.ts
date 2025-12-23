@@ -13,7 +13,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private readonly _extensionUri: vscode.Uri,
     ) { 
         this._contextManager = new ContextManager();
-        // [Fix] Use Singleton
         this._actionManager = ActionManager.getInstance();
     }
 
@@ -49,6 +48,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'run_terminal': {
+                    // [Security Note] ActionManager has modal confirmation, which is good.
                     this._actionManager.runInTerminal(data.command);
                     break;
                 }
@@ -98,18 +98,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private _getNonce() {
+        let text = '';
+        const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        for (let i = 0; i < 32; i++) {
+            text += possible.charAt(Math.floor(Math.random() * possible.length));
+        }
+        return text;
+    }
+
     private _getHtmlForWebview(webview: vscode.Webview) {
-        // ... (Keep existing HTML generation code unchanged as it refers to external main.js)
+        // [Security Fix] Generate Nonce
+        const nonce = this._getNonce();
+
+        // [Security Fix] Load local Vue.js instead of CDN
+        // User must download vue.global.prod.js to media/ folder
+        const vueUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'vue.global.prod.js'));
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'main.js'));
         const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'styles.css'));
+
+        // [Security Fix] CSP:
+        // 1. Remove unsafe-inline for styles/scripts (except styles if strictly needed, but better to use file)
+        // 2. Add 'nonce-...' for scripts
+        // 3. connect-src restricted to localhost (for now, ideally specific port)
+        // 4. script-src allow 'unsafe-eval' (Vue requirement) but NO external CDN
+        
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'unsafe-eval' [https://unpkg.com](https://unpkg.com); connect-src 'self' [http://127.0.0.1](http://127.0.0.1):*;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' 'unsafe-eval'; connect-src 'self' http://127.0.0.1:*;">
     <link href="${stylesUri}" rel="stylesheet">
-    <script src="[https://unpkg.com/vue@3/dist/vue.global.prod.js](https://unpkg.com/vue@3/dist/vue.global.prod.js)"></script>
+    <script nonce="${nonce}" src="${vueUri}"></script>
     <title>Gemini Swarm</title>
 </head>
 <body>
@@ -173,7 +194,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             <button @click="startTask" :disabled="isProcessing || !userInput">{{ isProcessing ? 'Processing...' : 'Send 🚀' }}</button>
         </div>
     </div>
-    <script src="${scriptUri}"></script>
+    <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
     }
