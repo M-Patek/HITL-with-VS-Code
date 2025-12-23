@@ -63,12 +63,15 @@ export class ProcessManager {
         this.outputChannel.appendLine(`[Boot] Script: ${scriptPath}`);
 
         try {
+            // [Security Fix] 使用 JSON.stringify 安全地序列化 API Key 列表，防止注入攻击
+            const safeApiKeys = JSON.stringify([apiKey]);
+
             this.serverProcess = cp.spawn(pythonPath, [scriptPath], {
                 cwd: cwd,
                 env: {
                     ...process.env,
                     PORT: port.toString(),
-                    GEMINI_API_KEYS: `["${apiKey}"]`,
+                    GEMINI_API_KEYS: safeApiKeys,
                     PINECONE_API_KEY: pineconeKey,
                     PYTHONUNBUFFERED: '1'
                 }
