@@ -5,24 +5,32 @@ import { GeminiQuickFixProvider } from './providers/quickFixProvider';
 import { SecurityManager } from './managers/securityManager';
 import { DependencyManager } from './managers/dependencyManager';
 import { ActionManager } from './managers/actionManager';
+import { GitManager } from './managers/gitManager';
+import { GeminiInlineCompletionProvider } from './providers/completionProvider'; // [Phase 3]
 
 let processManager: ProcessManager;
 
 export async function activate(context: vscode.ExtensionContext) {
-    // [Cleanup] Remove console.log in production
-    // console.log('Gemini Swarm Activated! 🐱'); 
-
     processManager = new ProcessManager();
     const securityManager = new SecurityManager();
     const dependencyManager = new DependencyManager();
     const chatProvider = new ChatViewProvider(context.extensionUri);
     const actionManager = ActionManager.getInstance();
+    const gitManager = new GitManager(); // [Phase 3] Need instance for commands
 
-    // 非阻塞检查 Docker
     securityManager.checkDockerAvailability();
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatProvider)
+    );
+
+    // [Phase 3 Upgrade] Register Inline Completion Provider
+    const completionProvider = new GeminiInlineCompletionProvider();
+    context.subscriptions.push(
+        vscode.languages.registerInlineCompletionItemProvider(
+            { pattern: '**' }, // Apply to all files
+            completionProvider
+        )
     );
 
     context.subscriptions.push(
@@ -33,6 +41,7 @@ export async function activate(context: vscode.ExtensionContext) {
         )
     );
 
+    // Commands...
     context.subscriptions.push(
         vscode.commands.registerCommand('gemini-swarm.startEngine', async () => {
             const success = await processManager.start(context);
@@ -65,6 +74,24 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('gemini-swarm.undoLastChange', () => {
             actionManager.undoLastChange();
+        })
+    );
+
+    // [Phase 3 Upgrade] Semantic Commit Command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('gemini-swarm.semanticCommit', async (msg: string) => {
+            // Confirm with user
+            const choice = await vscode.window.showInformationMessage(
+                `Gemini wants to commit: "${msg}"`,
+                "Commit", "Edit"
+            );
+            
+            if (choice === "Commit") {
+                await gitManager.doSemanticCommit(msg);
+            } else if (choice === "Edit") {
+                const newMsg = await vscode.window.showInputBox({ value: msg, prompt: "Edit commit message" });
+                if (newMsg) await gitManager.doSemanticCommit(newMsg);
+            }
         })
     );
 }
