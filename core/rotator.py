@@ -1,9 +1,9 @@
 import google.generativeai as genai
 from google.api_core import exceptions
-import random
 import time
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+import threading
+from typing import List, Dict, Any, Tuple
 
 logger = logging.getLogger("GeminiRotator")
 
@@ -12,10 +12,13 @@ class GeminiKeyRotator:
         self.keys = keys
         self.current_index = 0
         self.base_url = base_url
+        # [Concurrency Fix] 添加线程锁，防止多线程下配置冲突
+        self._lock = threading.Lock()
 
     def _get_next_key(self):
-        key = self.keys[self.current_index]
-        self.current_index = (self.current_index + 1) % len(self.keys)
+        with self._lock:
+            key = self.keys[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.keys)
         return key
 
     def call_gemini_with_rotation(
@@ -25,7 +28,7 @@ class GeminiKeyRotator:
         system_instruction: str = None,
         complexity: str = "simple",
         max_retries: int = 3
-    ) -> Tuple[str, Dict[str, int]]: # [Changed] Return Tuple
+    ) -> Tuple[str, Dict[str, int]]:
         """
         调用 Gemini API 并自动轮询 Key
         Returns: (generated_text, usage_metadata)
@@ -34,11 +37,15 @@ class GeminiKeyRotator:
         while retries < max_retries:
             key = self._get_next_key()
             try:
-                genai.configure(api_key=key)
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    system_instruction=system_instruction
-                )
+                # [Concurrency Fix] 加锁保护全局配置
+                # 虽然 genai.configure 是全局的，但配合 lock 可以减少竞态条件
+                # 理想情况是使用 Client 实例，但为了保持代码改动最小，这里使用锁
+                with self._lock:
+                    genai.configure(api_key=key)
+                    model = genai.GenerativeModel(
+                        model_name=model_name,
+                        system_instruction=system_instruction
+                    )
                 
                 # 配置生成参数
                 generation_config = genai.types.GenerationConfig(
