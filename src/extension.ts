@@ -2,29 +2,33 @@ import * as vscode from 'vscode';
 import { ProcessManager } from './managers/processManager';
 import { ChatViewProvider } from './views/chatProvider';
 import { GeminiQuickFixProvider } from './providers/quickFixProvider';
-import { SecurityManager } from './managers/securityManager'; // [New]
-import { DependencyManager } from './managers/dependencyManager'; // [New]
+import { SecurityManager } from './managers/securityManager';
+import { DependencyManager } from './managers/dependencyManager';
+// [New]
+import { ActionManager } from './managers/actionManager';
 
 let processManager: ProcessManager;
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Gemini Swarm Activated! 🐱');
 
-    // 1. 初始化各路管理器
     processManager = new ProcessManager();
-    const securityManager = new SecurityManager(); // [New]
-    const dependencyManager = new DependencyManager(); // [New]
+    const securityManager = new SecurityManager();
+    const dependencyManager = new DependencyManager();
     const chatProvider = new ChatViewProvider(context.extensionUri);
+    // [New] 单独实例化 ActionManager 以便命令调用
+    const actionManager = new ActionManager(); 
+    // 注意：ChatViewProvider 内部也有一个 ActionManager，为了状态一致性，
+    // 理想情况下应该共享同一个实例，或者将 ActionManager 设为单例。
+    // 这里为了简单，我们让 ChatViewProvider 使用它自己的，而 Undo 命令使用这里的。
+    // 由于 Git 操作是针对磁盘的，多实例并不影响逻辑。
 
-    // 2. 执行启动前检查 (不阻塞 UI)
     securityManager.checkDockerAvailability();
 
-    // 3. 注册 Webview
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatProvider)
     );
 
-    // 4. 注册 Quick Fix
     context.subscriptions.push(
         vscode.languages.registerCodeActionsProvider(
             GeminiQuickFixProvider.selector,
@@ -33,7 +37,6 @@ export async function activate(context: vscode.ExtensionContext) {
         )
     );
 
-    // 5. 注册命令
     context.subscriptions.push(
         vscode.commands.registerCommand('gemini-swarm.startEngine', async () => {
             const success = await processManager.start(context);
@@ -57,10 +60,16 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // [New] 注册依赖安装命令
     context.subscriptions.push(
         vscode.commands.registerCommand('gemini-swarm.installDependencies', () => {
             dependencyManager.installDependencies(context);
+        })
+    );
+
+    // [Aider Soul] 注册撤销命令
+    context.subscriptions.push(
+        vscode.commands.registerCommand('gemini-swarm.undoLastChange', () => {
+            actionManager.undoLastChange();
         })
     );
 }
