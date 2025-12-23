@@ -39,7 +39,6 @@ export class ProcessManager implements vscode.Disposable {
     private async resolvePythonPath(configPath: string): Promise<string> {
         if (configPath && configPath !== 'python') return configPath;
         return new Promise((resolve) => {
-            // Simple platform check, can be improved
             const cmd = process.platform === 'win32' ? 'python' : 'python3';
             cp.exec(`${cmd} --version`, (err) => resolve(err ? 'python' : cmd));
         });
@@ -72,24 +71,29 @@ export class ProcessManager implements vscode.Disposable {
 
             this.outputChannel.appendLine(`[Boot] Starting Engine at port ${port}...`);
 
-            // [Security Fix] Minimal Env & Suicide Pact PID
             const env = {
-                ...process.env, // Ideally filter this further
+                ...process.env, 
                 PORT: port.toString(),
                 GEMINI_API_KEYS: JSON.stringify([apiKey]),
                 PINECONE_API_KEY: pineconeKey,
                 SWARM_DATA_DIR: context.globalStorageUri.fsPath,
                 PYTHONUNBUFFERED: '1',
-                HOST_PID: process.pid.toString() // [Security Fix] Pass PID for suicide pact
+                HOST_PID: process.pid.toString() // Passed for suicide pact
             };
 
-            this.serverProcess = cp.spawn(pythonPath, [scriptPath], { cwd, env });
+            // [Security Fix] detached: false ensures child process is attached to parent's lifecycle by default (on some OS)
+            // But 'detached: true' + unref() is for zombies. We want the opposite.
+            // Defaults are usually fine, but being explicit helps understanding.
+            this.serverProcess = cp.spawn(pythonPath, [scriptPath], { 
+                cwd, 
+                env,
+                detached: false 
+            });
 
             this.serverProcess.stdout?.on('data', (data) => {
                 const msg = data.toString();
                 this.outputChannel.append(`[INFO] ${msg}`);
                 if (msg.includes("Uvicorn running on")) {
-                     // [Fix] Update Active Port only when actually running
                      ProcessManager.activePort = port;
                      vscode.window.showInformationMessage(`Gemini Engine Active on Port ${port} 🧠`);
                 }
@@ -120,7 +124,7 @@ export class ProcessManager implements vscode.Disposable {
 
     public stop() {
         if (this.serverProcess) {
-            this.serverProcess.kill();
+            this.serverProcess.kill(); 
             this.serverProcess = undefined;
             this.isRunning = false;
             ProcessManager.activePort = 0;
