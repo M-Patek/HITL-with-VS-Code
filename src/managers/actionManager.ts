@@ -146,6 +146,18 @@ export class ActionManager {
     public async undoLastChange() {
         // [Safety Check] 仅支持 Git Undo
         if (await this._gitManager.isGitRepo()) {
+            // [Security Fix] 检查提交信息，防止误删用户手动提交的代码
+            const lastMessage = await this._gitManager.getLastCommitMessage();
+            if (!lastMessage.includes("Gemini Swarm")) {
+                const selection = await vscode.window.showErrorMessage(
+                    `⚠️ Danger: The last commit "${lastMessage.trim()}" does not look like it was made by Gemini Swarm. Are you sure you want to revert it?`,
+                    { modal: true },
+                    "Yes, Force Revert", "Cancel"
+                );
+                
+                if (selection !== "Yes, Force Revert") return;
+            }
+
             await this._gitManager.undoLastCommit();
         } else {
             vscode.window.showErrorMessage("Undo is only available in Git repositories. Please manually restore from .bak files.");
