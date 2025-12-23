@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
 
-export class GitManager {
+export class GitManager implements vscode.Disposable {
     private rootPath: string | undefined;
     private outputChannel: vscode.OutputChannel;
 
@@ -13,9 +13,14 @@ export class GitManager {
         }
     }
 
-    private async exec(args: string[]): Promise<string> {
-        if (!this.rootPath) return "";
-        return new Promise((resolve, reject) => {
+    public dispose() {
+        this.outputChannel.dispose();
+    }
+
+    private async exec(args: string[]): Promise<{ stdout: string, stderr: string, code: number }> {
+        if (!this.rootPath) return { stdout: "", stderr: "No workspace root", code: -1 };
+        
+        return new Promise((resolve) => {
             const gitProcess = cp.spawn('git', args, { 
                 cwd: this.rootPath,
                 env: process.env 
@@ -25,32 +30,44 @@ export class GitManager {
             gitProcess.stdout.on('data', (d) => stdout += d.toString());
             gitProcess.stderr.on('data', (d) => stderr += d.toString());
             gitProcess.on('close', (code) => {
-                if (code !== 0) resolve(""); 
-                else resolve(stdout.trim());
+                resolve({ stdout: stdout.trim(), stderr: stderr.trim(), code: code ?? -1 });
             });
         });
     }
 
     public async isGitRepo(): Promise<boolean> {
         const result = await this.exec(['rev-parse', '--is-inside-work-tree']);
-        return result === 'true';
+        return result.stdout === 'true' && result.code === 0;
     }
 
     public async getLastCommitMessage(): Promise<string> {
         if (!await this.isGitRepo()) return "";
-        return await this.exec(['log', '-1', '--pretty=%B']);
+        const res = await this.exec(['log', '-1', '--pretty=%B']);
+        return res.stdout;
     }
 
     public async createCheckpoint(message: string = "Gemini Swarm: Auto-Checkpoint"): Promise<boolean> {
         if (!await this.isGitRepo()) return false;
-        const status = await this.exec(['status', '--porcelain']);
-        if (!status) return true;
+        
+        // 检查状态
+        const statusRes = await this.exec(['status', '--porcelain']);
+        if (statusRes.code !== 0) {
+             this.outputChannel.appendLine(`[Checkpoint Error] git status failed: ${statusRes.stderr}`);
+             return false;
+        }
+        if (!statusRes.stdout) return true; // Clean
 
         this.outputChannel.appendLine(`[Checkpoint] Saving dirty state...`);
         await this.exec(['add', '.']);
-        await this.exec(['commit', '-m', message]);
-        vscode.window.setStatusBarMessage('$(git-commit) Gemini Checkpoint Created', 3000);
-        return true;
+        const commitRes = await this.exec(['commit', '-m', message]);
+        
+        if (commitRes.code === 0) {
+            vscode.window.setStatusBarMessage('$(git-commit) Gemini Checkpoint Created', 3000);
+            return true;
+        } else {
+             this.outputChannel.appendLine(`[Checkpoint Error] Commit failed: ${commitRes.stderr}`);
+             return false;
+        }
     }
 
     public async undoLastCommit() {
@@ -58,32 +75,49 @@ export class GitManager {
             vscode.window.showErrorMessage('Not a git repository!');
             return;
         }
-        await this.exec(['reset', '--hard', 'HEAD~1']);
-        vscode.window.showInformationMessage('⏪ Changes Reverted');
+
+        // [Security Fix] 防止数据丢失：检查工作区是否脏
+        const statusRes = await this.exec(['status', '--porcelain']);
+        if (statusRes.code !== 0) {
+            vscode.window.showErrorMessage('Git status check failed. Aborting undo.');
+            return;
+        }
+
+        if (statusRes.stdout.length > 0) {
+            vscode.window.showErrorMessage(
+                '❌ Undo Aborted: You have uncommitted changes. Resetting now would lose your work. Please commit or stash them first.'
+            );
+            return;
+        }
+
+        const res = await this.exec(['reset', '--hard', 'HEAD~1']);
+        if (res.code === 0) {
+            vscode.window.showInformationMessage('⏪ Changes Reverted');
+        } else {
+            vscode.window.showErrorMessage(`Undo Failed: ${res.stderr}`);
+        }
     }
 
-    /**
-     * [Phase 3 Upgrade] Semantic Commit
-     */
     public async doSemanticCommit(message: string) {
         if (!await this.isGitRepo()) {
             vscode.window.showErrorMessage("Cannot commit: Not a git repository.");
             return;
         }
 
-        const status = await this.exec(['status', '--porcelain']);
-        if (!status) {
+        const statusRes = await this.exec(['status', '--porcelain']);
+        if (!statusRes.stdout) {
             vscode.window.showInformationMessage("Nothing to commit.");
             return;
         }
 
-        // Add all changes
         await this.exec(['add', '.']);
+        const res = await this.exec(['commit', '-m', message]);
         
-        // Commit with the AI generated message
-        await this.exec(['commit', '-m', message]);
-        
-        vscode.window.showInformationMessage(`✅ Semantic Commit: ${message}`);
-        this.outputChannel.appendLine(`[Semantic Commit] ${message}`);
+        if (res.code === 0) {
+            vscode.window.showInformationMessage(`✅ Semantic Commit: ${message}`);
+            this.outputChannel.appendLine(`[Semantic Commit] ${message}`);
+        } else {
+            vscode.window.showErrorMessage(`Commit Failed: ${res.stderr}`);
+        }
     }
 }
