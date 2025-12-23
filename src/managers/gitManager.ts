@@ -14,18 +14,39 @@ export class GitManager {
     }
 
     /**
-     * 执行 Git 命令的通用包装器
+     * [Security Fix] 使用 spawn 替代 exec 以防止 Shell 注入
+     * 参数必须作为数组传递，严禁字符串拼接
      */
     private async exec(args: string[]): Promise<string> {
         if (!this.rootPath) return "";
         
         return new Promise((resolve, reject) => {
-            cp.exec(`git ${args.join(' ')}`, { cwd: this.rootPath }, (err, stdout, stderr) => {
-                if (err) {
-                    this.outputChannel.appendLine(`[Git Error] ${stderr}`);
-                    // 不因为 git 失败而阻塞流程，只是记录日志并返回空，避免插件崩溃
-                    // 除非是致命错误，否则 resolve
-                    resolve(""); 
+            // 使用 spawn，shell: false (默认)
+            const gitProcess = cp.spawn('git', args, { 
+                cwd: this.rootPath,
+                env: process.env // 传递环境变量
+            });
+
+            let stdout = '';
+            let stderr = '';
+
+            gitProcess.stdout.on('data', (data) => {
+                stdout += data.toString();
+            });
+
+            gitProcess.stderr.on('data', (data) => {
+                stderr += data.toString();
+            });
+
+            gitProcess.on('error', (err) => {
+                this.outputChannel.appendLine(`[Git Error] Spawn failed: ${err.message}`);
+                resolve(""); // 保持原有的非阻塞行为
+            });
+
+            gitProcess.on('close', (code) => {
+                if (code !== 0) {
+                    this.outputChannel.appendLine(`[Git Error] Process exited with code ${code}: ${stderr}`);
+                    resolve("");
                 } else {
                     resolve(stdout.trim());
                 }
@@ -43,7 +64,6 @@ export class GitManager {
 
     /**
      * [Aider Soul] 创建修改前的“后悔药” (Auto-Commit)
-     * 策略：将当前所有未提交的修改（脏状态）暂存并提交，作为"Pre-Gemini Checkpoint"
      */
     public async createCheckpoint(message: string = "Gemini Swarm: Auto-Checkpoint"): Promise<boolean> {
         if (!await this.isGitRepo()) return false;
@@ -51,9 +71,6 @@ export class GitManager {
         // 1. 检查是否有未提交的更改
         const status = await this.exec(['status', '--porcelain']);
         if (!status) {
-            // 工作区是干净的，不需要 Checkpoint，或者已经是 Commit 状态
-            // 但为了保证能回滚，我们通常期望在 AI 修改前，工作区是 clean 的。
-            // 如果不 clean，Aider 的做法是先把用户的脏代码 commit 掉。
             return true;
         }
 
@@ -62,16 +79,15 @@ export class GitManager {
         // 2. 添加所有更改
         await this.exec(['add', '.']);
         
-        // 3. 提交
-        await this.exec(['commit', '-m', `"${message}"`]);
+        // 3. 提交 (参数分离，防止注入)
+        await this.exec(['commit', '-m', message]);
         
         vscode.window.setStatusBarMessage('$(git-commit) Gemini Checkpoint Created', 3000);
         return true;
     }
 
     /**
-     * [Undo] 回滚上一次提交 (危险操作，需谨慎)
-     * 相当于 Aider 的 /undo
+     * [Undo] 回滚上一次提交
      */
     public async undoLastCommit() {
         if (!await this.isGitRepo()) {
@@ -79,7 +95,6 @@ export class GitManager {
             return;
         }
 
-        // 确认回滚
         const selection = await vscode.window.showWarningMessage(
             "⚠️ Undo last commit? This will perform 'git reset --hard HEAD~1'. All changes in the last commit will be lost.",
             "Yes, Undo", "Cancel"
