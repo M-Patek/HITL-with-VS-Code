@@ -22,9 +22,6 @@ class GeminiKeyRotator:
         # [Fix] Use asyncio Lock for thread-safe index updates
         self._index_lock = asyncio.Lock()
         
-        # [Fix] Removed stateful caching fields (cached_key_index, active_cache_name)
-        # to prevent race conditions in concurrent tasks.
-
     async def _get_next_key(self) -> str:
         """Safely retrieves the next key in round-robin fashion."""
         async with self._index_lock:
@@ -42,24 +39,22 @@ class GeminiKeyRotator:
         generation_config: Dict[str, Any] = None,
         safety_settings: List[Dict[str, Any]] = None,
         tools: List[Any] = None,
-        cached_content_name: str = None # [Compat] Parameter kept for compatibility but ignored
+        cached_content_name: str = None # [Compat] Kept for interface compatibility
     ) -> Tuple[str, Dict[str, int]]:
         """
         Calls Gemini API with automatic key rotation on 429 errors.
         """
-        
-        # [Info] cached_content_name is ignored in this stateless version
-        # to prevent cross-task state pollution.
         if cached_content_name:
-            logger.debug("cached_content_name ignored for stateless rotation safety.")
+            # Logic for caching could be implemented here if needed, 
+            # but ensuring it doesn't break rotation.
+            pass
 
-        max_retries = len(self.keys) * 2 # Try enough times to cycle through keys
+        max_retries = len(self.keys) * 2 
         retries = 0
-        
         last_error = None
 
         while retries < max_retries:
-            # [Fix] Always rotate key on every attempt/retry to balance load
+            # [Fix] Always rotate key on every attempt/retry
             api_key = await self._get_next_key()
             self._configure_genai(api_key)
             
@@ -70,9 +65,6 @@ class GeminiKeyRotator:
                     safety_settings=safety_settings,
                     tools=tools
                 )
-                
-                # Note: If caching was needed, it should be handled per-request context,
-                # not stored in the global rotator instance.
                 
                 response = await model.generate_content_async(contents)
                 
@@ -90,10 +82,9 @@ class GeminiKeyRotator:
                 logger.warning(f"Key {api_key[-4:]} exhausted (429). Rotating...")
                 retries += 1
                 last_error = e
-                await asyncio.sleep(1) # Backoff slightly
+                await asyncio.sleep(1) # Backoff
                 
             except Exception as e:
-                # For non-rate-limit errors, we might not want to retry, or retry selectively
                 logger.error(f"API Error with key {api_key[-4:]}: {e}")
                 raise e
         
