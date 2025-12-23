@@ -33,12 +33,8 @@ export class ActionManager {
         if (!vscode.workspace.workspaceFolders) return null;
 
         const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-        // 使用 path.resolve 处理 '..'
         const fullPath = path.resolve(rootPath, relativePath);
         
-        // 确保解析后的绝对路径以 rootPath 开头
-        // 注意：Windows 上路径不区分大小写，这里进行简单的大小写不敏感检查更安全，
-        // 或者直接依赖 path.relative 检查是否以 '..' 开头
         const relative = path.relative(rootPath, fullPath);
         if (relative.startsWith('..') || path.isAbsolute(relative)) {
             vscode.window.showErrorMessage(`❌ Security Alert: Illegal path access detected! (${relativePath})`);
@@ -112,7 +108,22 @@ export class ActionManager {
         const fullPath = this.validatePath(relativePath);
         if (!fullPath) return;
 
-        await this.ensureCheckpoint(`Update ${relativePath}`);
+        // [Safety Fix] 如果不是 Git 仓库，创建 .bak 备份
+        const isGit = await this._gitManager.isGitRepo();
+        if (isGit) {
+            await this.ensureCheckpoint(`Update ${relativePath}`);
+        } else {
+            try {
+                if (fs.existsSync(fullPath)) {
+                    const backupPath = `${fullPath}.bak`;
+                    await fs.promises.copyFile(fullPath, backupPath);
+                    // 仅提示一次，避免过度打扰
+                    // vscode.window.showInformationMessage(`Backup created: ${path.basename(backupPath)}`);
+                }
+            } catch (e) {
+                console.warn("Failed to create backup", e);
+            }
+        }
 
         try {
             const dir = path.dirname(fullPath);
@@ -133,6 +144,11 @@ export class ActionManager {
     }
     
     public async undoLastChange() {
-        await this._gitManager.undoLastCommit();
+        // [Safety Check] 仅支持 Git Undo
+        if (await this._gitManager.isGitRepo()) {
+            await this._gitManager.undoLastCommit();
+        } else {
+            vscode.window.showErrorMessage("Undo is only available in Git repositories. Please manually restore from .bak files.");
+        }
     }
 }
