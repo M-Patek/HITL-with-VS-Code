@@ -1,290 +1,228 @@
-import re
-import json
+import logging
 import os
-import asyncio
+import json
 from typing import Dict, Any, List
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from core.utils import load_prompt
-from core.models import ProjectState
-from config.keys import GEMINI_MODEL_NAME
-from agents.crews.coding_crew.state import CodingCrewState
-from core.mcp_tool_definitions import MCPToolRegistry
+from core.models import GeminiModelConfig
+from core.rotator import GeminiKeyRotator
 from core.sandbox_manager import get_sandbox
-from tools.browser import WebLoader 
-from tools.memory import LocalRAGMemory
-from tools.search import GoogleSearchTool
+from core.mcp_tool_definitions import MCPToolDefinitions
+from agents.crews.coding_crew.state import CodingCrewState, ProjectState
 
-class CodingCrewNodes:
-    def __init__(self, rotator, memory: LocalRAGMemory = None, search: GoogleSearchTool = None):
-        self.rotator = rotator
-        self.memory = memory
-        self.search = search
-        self.base_prompt_path = os.path.join(os.path.dirname(__file__), "prompts")
-        self.active_cache_name = None
-        self.browser = WebLoader() 
+logger = logging.getLogger(__name__)
 
-    def _get_project_state(self, state: CodingCrewState) -> ProjectState:
-        return state.get("project_state")
-    
-    def _extract_json(self, text): 
-        try:
-            # [Display Fix] Use concatenation to avoid Markdown rendering issues
-            fence = "`" * 3
-            text = re.sub(f"^{fence}json\\s*", "", text, flags=re.MULTILINE)
-            text = re.sub(f"\\s*{fence}$", "", text, flags=re.MULTILINE)
-            return json.loads(text)
-        except json.JSONDecodeError:
-            match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(1))
-                except: pass
-            return {}
+class CodingNodes:
+    def __init__(self, config: GeminiModelConfig):
+        self.config = config
+        self.rotator = GeminiKeyRotator(config.base_url, config.api_keys)
+        self.prompts = self._load_prompts()
 
-    # [Async Fix] All nodes converted to async def to prevent blocking FastAPI event loop
-
-    async def planner_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Architect] Generates a step-by-step plan."""
-        print(f"\n🏗️ [Planner] Architecting solution...")
-        ps = self._get_project_state(state)
+    def _load_prompts(self) -> Dict[str, str]:
+        """Loads prompt templates from the prompts directory."""
+        prompts = {}
+        roles = ["architect", "coder", "reviewer", "planner", "debugger", "reflection", "summarizer"]
+        base_path = os.path.join(os.path.dirname(__file__), "prompts")
         
-        prompt_file = "planner.md"
-        if ps.mode == "architect":
-             prompt_file = "architect.md" 
-        
-        prompt_template = load_prompt(self.base_prompt_path, prompt_file)
-        if not prompt_template: prompt_template = "Plan the task: {user_input}"
-        
-        repo_map = ps.repo_map or "(No Repo Map)"
-        
-        prompt = prompt_template.format(
-            user_input=ps.user_input,
-            repo_map=repo_map,
-            diagnostics=ps.full_chat_history[-1].get("content") if ps.full_chat_history else ""
-        )
+        for role in roles:
+            file_path = os.path.join(base_path, f"{role}.md")
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    prompts[role] = f.read()
+            except FileNotFoundError:
+                logger.warning(f"Prompt file not found: {file_path}. Using fallback.")
+                prompts[role] = f"You are an expert {role}."
+        return prompts
 
-        # [Async Call]
-        resp, _ = await self.rotator.call_gemini_with_rotation(
-            GEMINI_MODEL_NAME,
-            [{"role": "user", "parts": [{"text": prompt}]}]
+    async def architect_node(self, state: CodingCrewState) -> Dict[str, Any]:
+        """
+        Architect analyzes the requirement and outputs a high-level plan.
+        """
+        logger.info("🏗️ Architect Node Running...")
+        prompt_content = self.prompts["architect"]
+        user_req = state.user_requirement
+        
+        contents = [
+            {"role": "user", "parts": [{"text": f"{prompt_content}\n\nRequirement: {user_req}"}]}
+        ]
+        
+        response_text, usage = await self.rotator.call_gemini_with_rotation(
+            model_name=self.config.model_name,
+            contents=contents
         )
         
-        plan = self._extract_json(resp)
-        if not isinstance(plan, list):
-            plan = ["Step 1: Execute user request directly."]
-            
-        return {"plan": plan, "current_step_index": 0, "project_state": ps}
+        # Robust Plan Parsing
+        # Assumes LLM outputs a list starting with "-" or numbered list
+        plan_steps = []
+        for line in response_text.split('\n'):
+            line = line.strip()
+            if line.startswith('- ') or (line[0].isdigit() and '. ' in line):
+                # Clean up marker
+                clean_step = line.split(' ', 1)[1].strip()
+                plan_steps.append(clean_step)
+        
+        if not plan_steps:
+            # Fallback if LLM was chatty
+            logger.warning("Architect produced no structured plan. Using generic plan.")
+            plan_steps = ["Analyze Codebase", "Implement Solution", "Verify Implementation"]
+
+        return {
+            "plan": plan_steps,
+            "messages": [HumanMessage(content=response_text)]
+        }
 
     async def coder_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Coder] Executes steps."""
-        ps = self._get_project_state(state)
-        step_idx = state.get("current_step_index", 0)
-        plan = state.get("plan", [])
-        current_step = plan[step_idx] if step_idx < len(plan) else "Finalize"
+        """
+        Coder generates code for the current step using available tools.
+        """
+        logger.info("👨‍💻 Coder Node Running...")
         
-        print(f"\n👨‍💻 [Coder] working on Step {step_idx + 1}: {current_step}")
+        # Get current step
+        if state.current_step_index < len(state.plan):
+            current_step = state.plan[state.current_step_index]
+        else:
+            current_step = "Final Review and Cleanup"
 
-        prompt_file = "coder.md"
-        if ps.mode == "debugger":
-             prompt_file = "debugger.md"
+        prompt_content = self.prompts["coder"]
+        
+        # Build Context
+        history_str = ""
+        if state.messages:
+            # Include last few messages for context
+            last_msgs = state.messages[-3:] 
+            for msg in last_msgs:
+                history_str += f"{msg.type}: {msg.content}\n"
 
-        prompt_template = load_prompt(self.base_prompt_path, prompt_file)
-        if not prompt_template: prompt_template = "Write code for: {user_input}"
+        context_msg = f"""
+        Current Plan Step: {current_step}
         
-        mcp_tools_desc = MCPToolRegistry.get_system_prompt_addition()
+        Recent History:
+        {history_str}
+        """
         
-        prompt = prompt_template.format(
-            user_input=f"Current Step: {current_step}\nOriginal Task: {ps.user_input}",
-            file_context=ps.file_context.json() if ps.file_context else "No active file",
-            repo_map=ps.repo_map or "",
-            feedback=state.get("review_feedback", "") + "\n" + state.get("reflection", ""),
-            mcp_tools=mcp_tools_desc
+        contents = [
+            {"role": "user", "parts": [{"text": f"{prompt_content}\n\n{context_msg}"}]}
+        ]
+        
+        # Call Gemini with Tools Definition
+        response_text, usage = await self.rotator.call_gemini_with_rotation(
+            model_name=self.config.model_name,
+            contents=contents,
+            tools=MCPToolDefinitions.get_coding_tools(),
+            cached_content_name=state.project_state.cache_name 
         )
-
-        # [Async Call]
-        resp, _ = await self.rotator.call_gemini_with_rotation(
-            GEMINI_MODEL_NAME,
-            [{"role": "user", "parts": [{"text": prompt}]}],
-            cached_content_name=self.active_cache_name
-        )
-        
-        tool_call = MCPToolRegistry.parse_tool_call(resp)
-        if tool_call:
-            ps.artifacts["pending_tool_call"] = tool_call
         
         return {
-            "project_state": ps, 
-            "generated_code": resp,
-            "linter_passed": True
+            "messages": [HumanMessage(content=response_text)],
+            "usage_metadata": usage
         }
 
     async def executor_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Executor] Runs code in Sandbox."""
-        ps = self._get_project_state(state)
-        code_response = state.get("generated_code", "")
+        """
+        Executes the tools generated by the Coder.
+        Features:
+        - Tool dispatching (write_file, read_file, execute_command)
+        - Data Loss Prevention (DLP) for secrets
+        """
+        logger.info("📦 Executor Node Running...")
         
-        # [Robustness Fix] Improved code block extraction
-        # Use string concatenation to hide the fence from Markdown parsers
-        fence = "`" * 3
+        last_message = state.messages[-1]
+        # Parse XML tool calls
+        tool_calls = MCPToolDefinitions.parse_tool_calls(last_message.content)
         
-        # Pattern 1: Tagged or untagged blocks
-        # Non-greedy match for content inside fences
-        pattern = fence + r"(?:python|py)?\s*\n?(.*?)\s*" + fence
-        matches = re.findall(pattern, code_response, re.DOTALL | re.IGNORECASE)
-        
-        code_blocks = []
-        if matches:
-            code_blocks = [m.strip() for m in matches if m.strip()]
-        else:
-            # Fallback: If no blocks, but content contains import or def, assume raw code
-            # (Only if it's not a tool call)
-            if not ps.artifacts.get("pending_tool_call"):
-                if "def " in code_response or "import " in code_response:
-                    code_blocks = [code_response.strip()]
+        # Retrieve the correct sandbox for this task
+        sandbox = get_sandbox(state.project_state.task_id)
+        if not sandbox:
+            return {"execution_output": "Error: CRITICAL - Sandbox environment not found for this task."}
 
-        if not code_blocks:
-            if ps.artifacts.get("pending_tool_call"):
-                return {
-                    "execution_stdout": "Tool call pending approval.",
-                    "execution_stderr": "",
-                    "execution_passed": True
-                }
-            return {
-                "execution_stdout": "No executable code found in response.",
-                "execution_stderr": "",
-                "execution_passed": True 
-            }
+        results = []
+        for tool in tool_calls:
+            try:
+                name = tool["name"]
+                params = tool["parameters"]
+                
+                output = ""
+                
+                if name == "execute_command":
+                    cmd = params.get("command")
+                    # Use execute_shell for shell commands
+                    stdout, stderr = sandbox.execute_shell(cmd)
+                    output = f"Stdout: {stdout}\nStderr: {stderr}"
+                    
+                elif name == "write_to_file":
+                    fpath = params.get("filepath")
+                    content = params.get("content")
+                    # Write file inside container using python helper
+                    # Escaping triple quotes for safety
+                    safe_content = content.replace("'''", "\\'\\'\\'")
+                    code = f"""
+import os
+os.makedirs(os.path.dirname('{fpath}'), exist_ok=True)
+with open('{fpath}', 'w', encoding='utf-8') as f:
+    f.write(r'''{content}''')
+print('File written successfully')
+"""
+                    stdout, stderr, _ = sandbox.execute_code(code)
+                    output = f"Write Result: {stdout} {stderr}"
 
-        sb = get_sandbox(ps.task_id)
-        if not sb:
-            return {"execution_stdout": "", "execution_stderr": "Sandbox not found", "execution_passed": False}
-            
-        full_stdout = ""
-        full_stderr = ""
-        passed = True
+                elif name == "read_file":
+                    fpath = params.get("filepath")
+                    code = f"""
+try:
+    with open('{fpath}', 'r', encoding='utf-8') as f:
+        print(f.read())
+except Exception as e:
+    print(f'Error reading file: {{e}}')
+"""
+                    stdout, stderr, _ = sandbox.execute_code(code)
+                    output = stdout if stdout.strip() else stderr
+
+                else:
+                    output = f"Unknown tool: {name}"
+
+                # [Security] Data Loss Prevention (DLP)
+                # Scrub secrets before returning to LLM or Logs
+                SENSITIVE_PATTERNS = ["BEGIN RSA PRIVATE KEY", "AWS_ACCESS_KEY_ID", "AIzaSy"]
+                for pattern in SENSITIVE_PATTERNS:
+                    if pattern in output:
+                        output = output.replace(pattern, "[REDACTED_SECRET]")
+
+                results.append(f"Tool '{name}':\n{output}")
+                
+            except Exception as e:
+                logger.error(f"Tool execution error: {e}")
+                results.append(f"Tool '{name}' Failed: {str(e)}")
+
+        execution_summary = "\n---\n".join(results)
         
-        for code in code_blocks:
-            # Sandbox execution is technically synchronous (Docker client), 
-            # but wrapping it in executor would be better if heavy.
-            # For now, keeping it simple as Docker client usually releases GIL.
-            out, err, imgs = sb.execute_code(code)
-            full_stdout += out + "\n"
-            full_stderr += err + "\n"
-            if err: passed = False
-            if imgs:
-                ps.artifacts.setdefault("image_artifacts", []).extend(imgs)
-
         return {
-            "execution_stdout": full_stdout.strip(),
-            "execution_stderr": full_stderr.strip(),
-            "execution_passed": passed,
-            "image_artifacts": ps.artifacts.get("image_artifacts", [])
+            "execution_output": execution_summary if execution_summary else "No tools executed."
         }
 
     async def reviewer_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Reviewer] Reviews code."""
-        ps = self._get_project_state(state)
-        prompt_template = load_prompt(self.base_prompt_path, "reviewer.md")
-        if not prompt_template: prompt_template = "Review code: {code}"
+        """
+        Reviews the code changes and execution output.
+        """
+        logger.info("🕵️ Reviewer Node Running...")
+        prompt = self.prompts["reviewer"]
         
-        prompt = prompt_template.format(
-            user_input=ps.user_input,
-            code=state.get("generated_code", ""),
-            stdout=state.get("execution_stdout", ""),
-            stderr=state.get("execution_stderr", "")
-        )
-
-        # [Async Call]
-        resp, _ = await self.rotator.call_gemini_with_rotation(
-            GEMINI_MODEL_NAME,
-            [{"role": "user", "parts": [{"text": prompt}]}]
+        last_exec = state.execution_output if hasattr(state, 'execution_output') else "No execution output."
+        last_plan = state.plan[state.current_step_index] if state.plan else "Unknown Step"
+        
+        contents = [{
+            "role": "user", 
+            "parts": [{"text": f"{prompt}\n\nTask Step: {last_plan}\n\nExecution Result:\n{last_exec}"}]
+        }]
+        
+        response_text, _ = await self.rotator.call_gemini_with_rotation(
+            model_name=self.config.model_name,
+            contents=contents
         )
         
-        review_json = self._extract_json(resp)
-        status = review_json.get("status", "approve")
-        feedback = review_json.get("feedback", "")
+        # Check approval
+        is_approved = "APPROVE" in response_text.upper() and "REJECT" not in response_text.upper()
         
         return {
-            "functional_status": status,
-            "functional_feedback": feedback,
-            "review_report": review_json
+            "messages": [HumanMessage(content=response_text)],
+            "approved": is_approved
         }
-
-    async def security_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        return {"security_feedback": "Security Check Passed (Mock)"}
-
-    async def aggregator_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        func_status = state.get("functional_status", "approve")
-        func_feedback = state.get("functional_feedback", "")
-        sec_feedback = state.get("security_feedback", "")
-        
-        final_status = "approve" if func_status == "approve" else "reject"
-        final_feedback = f"{func_feedback}\n{sec_feedback}".strip()
-        
-        return {
-            "review_status": final_status,
-            "review_feedback": final_feedback
-        }
-
-    async def reflector_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Reflector] Analyzes failure."""
-        ps = self._get_project_state(state)
-        prompt_template = load_prompt(self.base_prompt_path, "reflection.md")
-        if not prompt_template: prompt_template = "Reflect on error: {execution_stderr}"
-        
-        prompt = prompt_template.format(
-            user_input=ps.user_input,
-            code=state.get("generated_code", ""),
-            execution_stderr=state.get("execution_stderr", ""),
-            review_report=state.get("review_feedback", "")
-        )
-
-        # [Async Call]
-        resp, _ = await self.rotator.call_gemini_with_rotation(
-            GEMINI_MODEL_NAME,
-            [{"role": "user", "parts": [{"text": prompt}]}]
-        )
-        
-        return {
-            "reflection": resp,
-            "iteration_count": state.get("iteration_count", 0) + 1
-        }
-
-    async def summarizer_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Summarizer] Finalizing & Semantic Commit"""
-        print(f"🎉 [Summarizer] Finalizing...")
-        ps = self._get_project_state(state)
-        
-        prompt_template = load_prompt(self.base_prompt_path, "summarizer.md")
-        if not prompt_template: prompt_template = "Summarize: {user_input}"
-
-        prompt = prompt_template.format(
-             user_input=ps.user_input,
-             code=state.get("generated_code", ""),
-             execution_output=state.get("execution_stdout", "")
-        )
-        
-        # [Async Call]
-        resp, usage = await self.rotator.call_gemini_with_rotation(
-            GEMINI_MODEL_NAME,
-            [{"role": "user", "parts": [{"text": prompt}]}],
-            cached_content_name=self.active_cache_name
-        )
-        
-        if ps.code_blocks:
-            commit_prompt = f"""
-            Based on the following user task and code changes, generate a concise Conventional Commit message (e.g., 'feat: add login').
-            Only return the message string.
-            
-            Task: {ps.user_input}
-            """
-            # [Async Call]
-            commit_msg, _ = await self.rotator.call_gemini_with_rotation(
-                GEMINI_MODEL_NAME,
-                [{"role": "user", "parts": [{"text": commit_prompt}]}],
-                complexity="simple"
-            )
-            ps.artifacts["commit_proposal"] = commit_msg.strip()
-
-        ps.final_report = resp
-        return {"final_output": resp, "project_state": ps}
