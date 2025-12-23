@@ -1,52 +1,164 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <!-- ... (Head content) ... -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- CSP: Allow style/script from extension and connect to local backend -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'unsafe-eval' https://unpkg.com; connect-src 'self' http://127.0.0.1:*;">
     <link href="${stylesUri}" rel="stylesheet">
-    <script src="[https://unpkg.com/vue@3/dist/vue.global.prod.js](https://unpkg.com/vue@3/dist/vue.global.prod.js)"></script>
-    <title>Gemini Swarm</title>
+    <!-- Vue 3 CDN (In production, you might bundle this) -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <title>Gemini Swarm Mission Control</title>
 </head>
 <body>
     <div id="app">
-        <!-- Chat Container -->
-        <div id="chat-container" ref="chatContainer">
-            <!-- ... (Messages Loop) ... -->
-            <div v-for="(msg, idx) in messages" :key="idx" :class="['message', msg.role]">
-                <!-- ... (Content render logic) ... -->
-                <div v-if="msg.type === 'tool_proposal'" class="artifact-card tool-card">
-                    <!-- ... (Tool Card) ... -->
-                    <div class="tool-actions" v-if="!msg.approved && !msg.rejected">
-                         <button v-if="msg.content.tool === 'write_to_file'" class="diff-btn" @click="viewDiff(msg.content)">👀 View Diff</button>
-                         <button class="approve-btn" @click="approveTool(idx, msg.content)">✅ Approve</button>
-                         <button class="reject-btn" @click="rejectTool(idx)">❌ Reject</button>
-                    </div>
-                    <!-- ... -->
+        <!-- 1. HUD Header: System Status & Costs -->
+        <header class="hud-header">
+            <div class="status-group">
+                <div class="status-item" :class="{ active: serverPort }">
+                    <span class="status-dot"></span>
+                    <span class="status-label">ENGINE: {{ serverPort || 'OFF' }}</span>
                 </div>
-                <!-- ... -->
-                <div v-else>{{ msg.content }}</div>
+                <div class="status-item" :class="{ active: isSandboxActive }">
+                    <span class="icon">📦</span>
+                    <span class="status-label">{{ isSandboxActive ? 'DOCKER' : 'MOCK' }}</span>
+                </div>
             </div>
-        </div>
+            
+            <div class="cost-group" v-if="costStats.totalTokens > 0">
+                <span class="cost-value">${{ costStats.totalCost.toFixed(4) }}</span>
+                <span class="cost-label">USD</span>
+            </div>
+        </header>
 
-        <!-- [Roo Code] Cost Dashboard -->
-        <div id="cost-dashboard" v-if="costStats.totalTokens > 0">
-            <span class="cost-item">
-                💎 Tokens: <strong>{{ formatNumber(costStats.totalTokens) }}</strong>
-            </span>
-            <span class="cost-divider">|</span>
-            <span class="cost-item">
-                💸 Cost: <strong>${{ costStats.totalCost.toFixed(4) }}</strong>
-            </span>
-            <span class="cost-divider">|</span>
-            <span class="cost-item">
-                🔄 Req: {{ costStats.requests }}
-            </span>
-        </div>
+        <!-- 2. Main Timeline: Chat & Artifacts -->
+        <main id="chat-container" ref="chatContainer">
+            <div v-if="messages.length === 0" class="welcome-screen">
+                <div class="logo">🐱</div>
+                <h2>Gemini Swarm</h2>
+                <p>Coding Crew is ready, Master.</p>
+                <div class="capabilities">
+                    <span>🧠 LangGraph Brain</span>
+                    <span>🛡️ Docker Sandbox</span>
+                    <span>👁️ Repo Map Context</span>
+                </div>
+            </div>
 
-        <!-- Input Area -->
-        <div id="input-area">
-            <textarea v-model="userInput" @keydown.enter.prevent="startTask" placeholder="Ask Coding Crew..." rows="3" :disabled="isProcessing"></textarea>
-            <button @click="startTask" :disabled="isProcessing || !userInput">{{ isProcessing ? 'Processing...' : 'Send 🚀' }}</button>
-        </div>
+            <div v-for="(msg, idx) in messages" :key="idx" :class="['message-row', msg.role]">
+                
+                <!-- Avatar -->
+                <div class="avatar" :title="msg.role">
+                    <span v-if="msg.role === 'user'">👤</span>
+                    <span v-else-if="msg.role === 'ai'">🤖</span>
+                    <span v-else>⚙️</span>
+                </div>
+
+                <!-- Message Content -->
+                <div class="message-content">
+                    
+                    <!-- Text Message -->
+                    <div v-if="msg.type !== 'code' && msg.type !== 'tool_proposal' && msg.type !== 'image'" class="bubble">
+                        <div v-if="msg.role === 'system'" class="system-prefix">[SYSTEM]</div>
+                        {{ msg.content }}
+                    </div>
+
+                    <!-- 🖼️ Image Artifact (Matplotlib/Sandbox) -->
+                    <div v-else-if="msg.type === 'image'" class="artifact-card image-card">
+                        <div class="artifact-header">
+                            <span>📊 Generated Image</span>
+                            <span class="filename">{{ msg.label }}</span>
+                        </div>
+                        <div class="image-wrapper">
+                            <img :src="msg.content" alt="Generated Plot" />
+                        </div>
+                    </div>
+
+                    <!-- 💻 Code Artifact -->
+                    <div v-else-if="msg.type === 'code'" class="artifact-card code-card">
+                        <div class="artifact-header">
+                            <span>📝 Generated Code</span>
+                            <div class="actions">
+                                <button class="icon-btn" @click="insertCode(msg.content)" title="Insert at Cursor">📥 Insert</button>
+                            </div>
+                        </div>
+                        <pre class="code-preview"><code>{{ msg.content }}</code></pre>
+                    </div>
+
+                    <!-- 🛠️ Tool Proposal (The Hands) -->
+                    <div v-else-if="msg.type === 'tool_proposal'" class="artifact-card tool-card" :class="{ approved: msg.approved, rejected: msg.rejected }">
+                        <div class="tool-header">
+                            <span class="tool-icon" v-if="msg.content.tool === 'write_to_file'">💾</span>
+                            <span class="tool-icon" v-else>⚡</span>
+                            <span class="tool-name">{{ msg.label }}</span>
+                        </div>
+                        
+                        <div class="tool-body">
+                            <!-- Write File Details -->
+                            <div v-if="msg.content.tool === 'write_to_file'">
+                                <div class="param-row">
+                                    <span class="label">PATH:</span>
+                                    <span class="value path">{{ msg.content.params.path }}</span>
+                                </div>
+                                <div class="diff-preview-hint">
+                                    Click "View Diff" to inspect changes before approving.
+                                </div>
+                            </div>
+                            
+                            <!-- Execute Command Details -->
+                            <div v-else-if="msg.content.tool === 'execute_command'">
+                                <div class="param-row">
+                                    <span class="label">CMD:</span>
+                                    <code class="value command">{{ msg.content.params.command }}</code>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Action Bar -->
+                        <div class="tool-actions" v-if="!msg.approved && !msg.rejected">
+                            <button v-if="msg.content.tool === 'write_to_file'" class="btn secondary" @click="viewDiff(msg.content)">
+                                👁️ View Diff
+                            </button>
+                            <div class="approval-group">
+                                <button class="btn reject" @click="rejectTool(idx)">🚫 Reject</button>
+                                <button class="btn approve" @click="approveTool(idx, msg.content)">✅ Approve</button>
+                            </div>
+                        </div>
+
+                        <!-- Status Stamp -->
+                        <div class="status-stamp approved" v-if="msg.approved">APPROVED</div>
+                        <div class="status-stamp rejected" v-if="msg.rejected">REJECTED</div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- Thinking Indicator -->
+            <div v-if="isProcessing" class="thinking-row">
+                <div class="spinner"></div>
+                <span>Coding Crew is working...</span>
+            </div>
+        </main>
+
+        <!-- 3. Input Deck -->
+        <footer class="input-deck">
+            <div class="toolbar">
+                <button class="tool-btn" @click="runTest" title="Run Terminal Test">💻</button>
+                <span class="spacer"></span>
+                <span class="token-counter" v-if="costStats.totalTokens">{{ formatNumber(costStats.totalTokens) }} toks</span>
+            </div>
+            <div class="input-wrapper">
+                <textarea 
+                    v-model="userInput" 
+                    @keydown.enter.prevent="startTask" 
+                    placeholder="Describe your task (e.g., 'Refactor this class', 'Create a snake game')..." 
+                    rows="1"
+                    ref="inputBox"
+                ></textarea>
+                <button class="send-btn" @click="startTask" :disabled="isProcessing || !userInput">
+                    🚀
+                </button>
+            </div>
+        </footer>
     </div>
     <script src="${scriptUri}"></script>
 </body>
