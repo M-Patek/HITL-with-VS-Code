@@ -1,189 +1,142 @@
-Gemini Swarm Engine (VS Code Edition) 🚀
+# 🚀 Swarm Engine (VS Code Edition)
 
-Gemini Swarm 不是一个简单的聊天机器人，它是寄生在你 IDE 中的 AI 结对编程生命体。
-它拥有一颗基于 LangGraph 的独立 Python 大脑，能够感知你的代码上下文、在 Docker 沙箱中自我修正，并直接操控编辑器。
+> **The "Frankenstein" AI Coding Engine** — 融合了 Aider 的全知视角、OpenDevin 的持久化沙箱、Roo Code 的交互体验，以及 LangGraph 的深度思考能力。
 
-🧠 核心架构 (Hybrid Architecture)
+**Swarm** 是一个寄生在你 VS Code 里的 **全自动编程生命体**。它拥有一颗基于 Python 的独立大脑，能够感知代码全局、在 Docker 容器中试错，并直接修改你的源文件。
 
-本项目采用 "TypeScript 宿主 + Python 引擎" 的双进程混合架构，结合了 VS Code 的原生交互体验与 Python 生态在 Agent 编排上的强大能力。
+---
 
+## ✨ 核心特性 (Core Features)
+
+### 1. 🧬 自我修正的 Coding Crew (The Brain)
+我们内置了一个 **LangGraph 状态机**，形成完美的闭环：
+- **Coder**: 编写代码或调用工具。
+- **Executor**: 在 **Docker 沙箱** 中实际运行代码，捕获报错。
+- **Reviewer**: 强制性的 JSON 格式代码审查。
+- **Reflector**: 遇到错误时自动分析根因，生成修复策略，并指挥 Coder 重试。
+> *它会一直尝试，直到代码跑通或达到最大重试次数！*
+
+### 2. 👁️ 上下文全知之眼 (The God's Eye)
+- **Repo Map**: 利用 `Tree-sitter` 解析整个项目的 AST（抽象语法树），生成精简的代码骨架。AI 不需要读取所有文件就能理解复杂的项目结构。
+- **RAG Memory**: 支持 `@Codebase` 指令，通过向量数据库检索相关代码片段。
+- **Deep Context**: 自动读取当前文件的光标位置、选区以及 **红色的波浪线报错**。
+
+### 3. 🛡️ 永不消逝的沙箱 (The Immortal Sandbox)
+- **Stateful Docker**: 容器启动后通过 `tail -f /dev/null` 保持常驻，支持连续的 Shell 会话。
+- **Image Capture**: 甚至能运行 `matplotlib` 绘图代码，并将生成的图表直接传回 VS Code 聊天窗口。
+
+### 4. ⚡️ MCP 风格的副作用 (The Hands)
+- **XML Protocol**: 采用轻量级的 XML 协议调用工具 (`<tool_code>`)。
+- **Safety First**:
+  - **Git Checkpoint**: 每次写文件前自动创建 Git 提交，随时可以“后悔” (Undo)。
+  - **Diff Preview**: 像 Roo Code 一样，在写入前弹出一份漂亮的 Diff 对比视图供你审批。
+
+### 5. 💰 实时成本监控
+- 每次对话都会计算 Token 消耗，并根据 Gemini 费率实时估算美元成本，让你心中有数。
+
+---
+
+## 🏗️ 混合架构 (Hybrid Architecture)
+
+本项目采用 **TypeScript (Host) + Python (Brain)** 的双进程设计：
+
+```mermaid
 graph TD
-    subgraph "VS Code Host (TypeScript)"
-        UI[Webview Sidebar] <-->|PostMessage| Ext[Extension Main Process]
-        Ext -->|Spawn| PythonProc[Python Subprocess]
-        Ext -->|Context API| Editor[Active Editor / Diagnostics]
-        Ext -->|Action API| Terminal[Integrated Terminal]
+    subgraph "VS Code Extension (TypeScript)"
+        UI[Mission Control Webview] <-->|SSE Stream| Server
+        Ext[Extension Main] -->|Spawn| PythonProc
+        Ext -->|Action Manager| FS[File System & Git]
     end
 
-    subgraph "The Brain (Python/LangGraph)"
-        PythonProc -->|FastAPI| Server[API Server]
-        Server <-->|SSE Stream| UI
-        Server -->|Graph Run| Agent[Coding Crew]
+    subgraph "Python Engine (FastAPI + LangGraph)"
+        PythonProc --> Server[API Server]
+        Server -->|Run| Workflow[Coding Crew Graph]
         
-        subgraph "Coding Crew (Agentic Loop)"
-            Agent --> Coder
-            Coder --> Executor[Sandbox Executor]
-            Executor --> Reviewer
+        subgraph "The Loop"
+            Coder -->|Code| Executor
+            Executor -->|Result| Reviewer
             Reviewer -->|Reject| Reflector
             Reflector -->|Fix Strategy| Coder
         end
+        
+        Executor <-->|Exec| Docker[Docker Container]
     end
-    
-    Executor -.->|Docker API| Docker[Docker Container]
+```
 
+---
 
-✨ 核心特性
+## 📦 快速开始 (Quick Start)
 
-1. 🧬 专用的 Coding Crew 引擎
+### 前置要求
+1.  **VS Code** v1.85+
+2.  **Python 3.10+** (请确保 `python` 或 `python3` 在 PATH 中)
+3.  **Docker Desktop** (强烈推荐，用于启用沙箱功能；否则将降级为 Mock 模式)
+4.  **Google Gemini API Key**
 
-不同于通用的 LLM 问答，内置的 Python 引擎运行着一个闭环的 LangGraph 状态机：
+### 安装步骤
+1.  克隆本仓库。
+2.  安装 Node 依赖：
+    ```bash
+    npm install
+    ```
+3.  打包 Python 后端（这一步会将 Python 源码移动到 `dist/` 目录）：
+    ```bash
+    npm run package-backend
+    ```
+4.  按 `F5` 启动调试，或运行 `npm run package` 生成 `.vsix` 安装包。
 
-Coder: 编写代码。
+### 配置
+打开 VS Code 设置 (Ctrl+,)，搜索 `Gemini Swarm`：
+- **Api Key**: 填入你的 Google Gemini Key (必需)。
+- **Python Path**: 指定 Python 解释器路径 (如 `python3` 或完整路径)。
 
-Executor: (可选) 在 Docker 安全沙箱中试运行代码。
+### 初始化
+在首次运行时，按 `Ctrl+Shift+P` 打开命令面板，执行：
+> **Gemini: Install Python Dependencies**
+> *(这将自动安装 FastAPI, LangGraph, Docker SDK 等 Python 库)*
 
-Reviewer: 审查代码质量。
+---
 
-Reflector: 如果出错，自动分析根因并制定修复策略，直到代码跑通。
+## 🎮 使用指南 (Usage)
 
-2. 👁️ 上下文感知 (Context Awareness)
+### 💬 Mission Control (对话)
+- 直接描述需求，例如："帮我写一个贪吃蛇游戏"。
+- 使用 `@Docs URL` 抓取在线文档。
 
-AI 不再是盲人。当你发起任务时，插件会自动收集：
+### 💡 一键修复 (Quick Fix)
+- 当代码出现红色波浪线时，点击灯泡图标，选择 **✨ Fix with Gemini Swarm**。AI 会自动读取报错并尝试修复。
 
-文件上下文: 当前文件名、语言、光标行号。
+### 🛠️ 终端命令
+- AI 可以请求执行 Shell 命令（如 `npm install`）。你需要点击 "Approve" 按钮授权。
 
-代码选区: 你选中的具体代码片段。
+### ⏪ 时光倒流
+- 觉得 AI 改乱了？执行命令 **Gemini: Undo Last AI Change**，瞬间回滚到修改前的状态。
 
-项目结构: 工作区的文件树概览。
+---
 
-诊断信息: 当前文件的报错（红波浪线）。
+## 📂 项目结构
 
-3. ⚡️ 深度副作用 (Deep Side-Effects)
-
-AI 拥有了“手脚”，可以执行实际操作：
-
-Insert Code: 一键将生成的代码插入光标处或替换选区。
-
-Auto-Fix: 点击代码报错处的“灯泡”，直接召唤 AI 修复 Bug。
-
-Run Terminal: 指挥终端执行 pip install, npm test 等命令。
-
-4. 🛡️ 企业级安全
-
-Docker Sandbox: 代码执行默认在隔离容器中进行（需本地安装 Docker）。
-
-Dependency Isolation: 内置依赖管理，不污染全局 Python 环境。
-
-📦 安装与配置
-
-前置要求
-
-VS Code v1.85+
-
-Python 3.10+ (并将 python 加入 PATH)
-
-Google Gemini API Key (必需)
-
-Docker Desktop (可选，用于启用安全沙箱功能)
-
-快速开始
-
-安装插件: 将 .vsix 文件拖入 VS Code 或在源码目录下按 F5 调试。
-
-配置密钥:
-打开 VS Code 设置 (Ctrl+,)，搜索 Gemini Swarm，填入：
-
-Gemini Swarm: Api Key: 你的 Google Gemini API Key。
-
-安装依赖:
-按 Ctrl+Shift+P 打开命令面板，运行：
-
-> Gemini: Install Python Dependencies
-
-
-等待右下角提示“依赖安装成功”。
-
-启动引擎:
-
-> Gemini: Start Engine
-
-
-侧边栏将自动打开，你现在可以开始对话了！
-
-🎮 使用指南
-
-💬 Mission Control (侧边栏对话)
-
-在输入框描述你的需求，例如："帮我写一个贪吃蛇游戏"。
-
-插入代码: AI 生成代码后，点击代码卡片右上角的 INSERT 📥 按钮，代码将自动写入当前光标位置。
-
-💡 Quick Fix (一键修复)
-
-当编辑器中出现红色波浪线报错时，将鼠标悬停。
-
-点击 "Quick Fix" (或按 Ctrl+.)。
-
-选择 ✨ Fix with Gemini Swarm。
-
-侧边栏会自动激活，读取报错上下文并生成修复代码。
-
-🖥️ 终端交互
-
-你可以要求 AI 执行命令，例如："运行测试并告诉我结果"。
-
-AI 会请求权限在 Gemini Swarm Terminal 中执行 Shell 命令。
-
-🛠️ 开发者指南 (Build & Contribute)
-
-如果你想修改本插件的源码，请遵循以下步骤。
-
-项目结构
-
+```
 .
-├── src/                # TypeScript 插件源码 (宿主逻辑)
-│   ├── managers/       # 进程、上下文、安全管理器
-│   ├── views/          # Webview 提供者
-│   └── extension.ts    # 入口文件
-├── media/              # Webview 前端源码 (Vue 3 + CSS)
-├── python_backend/     # Python 核心引擎 (构建后生成)
-├── agents/             # Python Agent 源码 (原始)
-├── core/               # Python 核心库
-├── package.json        # 插件清单
-└── scripts/            # 构建脚本
+├── src/                  # TypeScript 宿主逻辑 (UI, Process, Actions)
+│   ├── managers/         # 进程、Git、安全管理
+│   └── views/            # Webview 实现
+├── python_backend/       # Python 智能引擎 (构建后生成)
+├── agents/               # LangGraph Agents (Coding Crew)
+│   └── crews/coding_crew # 核心 Coding Crew 实现
+├── core/                 # 核心库 (RepoMap, Sandbox, RAG)
+├── tools/                # 工具集 (Docker, Browser, Search)
+└── media/                # Vue 3 前端界面
+```
 
+---
 
-构建流程
+## ❤️ Credits & Inspiration
 
-安装 Node 依赖:
+本项目致敬并学习了以下开源项目的优秀设计：
+- **Aider**: 代码地图 (Repo Map) 与 Chat-to-Edit 理念。
+- **OpenDevin**: 强大的 Docker 沙箱实现。
+- **Roo Code (Roo-Cline)**: XML 工具协议与交互式 Diff 界面。
+- **Continue**: 上下文检索 (RAG) 与 IDE 集成体验。
 
-npm install
-
-
-打包 Python 后端:
-我们将 Python 源码从根目录移动到 dist/python_backend 以便分发。
-
-npm run package-backend
-
-
-编译 TypeScript:
-
-npm run compile
-
-
-打包 VSIX:
-
-npm run package
-# 然后使用 vsce package (需安装: npm i -g @vscode/vsce)
-vsce package
-
-
-⚠️ 常见问题
-
-Q: 启动引擎时提示 "Docker 未运行"？
-A: 这是为了安全。如果没有 Docker，Coding Crew 将进入 Mock Mode，它依然能写代码，但无法在内部执行和自我测试。请启动 Docker Desktop 以获得完整体验。
-
-Q: 点击 "Install Dependencies" 失败？
-A: 请检查你的 python 命令是否可用。你可以在设置中手动指定 Gemini Swarm: Python Path (例如 /usr/bin/python3 或 conda 环境路径)。
-
-Made with ❤️ by Gemini Swarm Team (and a Catgirl AI 🐱)
+---
