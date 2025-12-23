@@ -1,81 +1,45 @@
 import * as vscode from 'vscode';
-import axios from 'axios';
-import { ProcessManager } from '../managers/processManager';
 
-export class GeminiInlineCompletionProvider implements vscode.InlineCompletionItemProvider {
-    private debounceTimer: NodeJS.Timeout | undefined;
-    private requestController: AbortController | undefined;
+// [Functionality Fix] 实现了真正的 Quick Fix (小灯泡) 功能
+export class GeminiQuickFixProvider implements vscode.CodeActionProvider {
+    public static readonly selector = '*';
 
-    public async provideInlineCompletionItems(
-        document: vscode.TextDocument,
-        position: vscode.Position,
-        context: vscode.InlineCompletionContext,
-        token: vscode.CancellationToken
-    ): Promise<vscode.InlineCompletionItem[] | undefined> {
+    provideCodeActions(document: vscode.TextDocument, range: vscode.Range | vscode.Selection, context: vscode.CodeActionContext, token: vscode.CancellationToken): vscode.CodeAction[] {
+        // 如果没有报错，不显示修复选项
+        if (context.diagnostics.length === 0) {
+            return [];
+        }
+
+        const actions: vscode.CodeAction[] = [];
         
-        // 1. Basic Checks
-        const port = ProcessManager.getActivePort();
-        if (!port) return undefined;
+        // 遍历所有诊断信息（红色波浪线）
+        for (const diagnostic of context.diagnostics) {
+            const title = `✨ Fix with Gemini: ${diagnostic.message}`;
+            const action = new vscode.CodeAction(title, vscode.CodeActionKind.QuickFix);
+            
+            // 绑定命令，点击后触发 ChatProvider 的修复流程
+            action.command = {
+                command: 'gemini-swarm.triggerFix',
+                title: 'Fix with Gemini',
+                arguments: [
+                    diagnostic.message, 
+                    this.getContext(document, diagnostic.range)
+                ]
+            };
+            
+            action.diagnostics = [diagnostic];
+            action.isPreferred = true; // 设为首选修复
+            actions.push(action);
+        }
 
-        // Skip if triggered explicitly by typing a character that shouldn't trigger (optional optimization)
-        
-        // 2. Debounce & Cancellation
-        if (this.debounceTimer) clearTimeout(this.debounceTimer);
-        if (this.requestController) this.requestController.abort();
+        return actions;
+    }
 
-        return new Promise((resolve) => {
-            this.debounceTimer = setTimeout(async () => {
-                if (token.isCancellationRequested) {
-                    resolve(undefined);
-                    return;
-                }
-
-                try {
-                    // 3. Prepare Context
-                    // Get ~20 lines before and after for context window
-                    const startLine = Math.max(0, position.line - 20);
-                    const endLine = Math.min(document.lineCount - 1, position.line + 20);
-                    
-                    const prefixRange = new vscode.Range(new vscode.Position(startLine, 0), position);
-                    const suffixRange = new vscode.Range(position, new vscode.Position(endLine, document.lineAt(endLine).text.length));
-                    
-                    const prefix = document.getText(prefixRange);
-                    const suffix = document.getText(suffixRange);
-                    
-                    this.requestController = new AbortController();
-
-                    // 4. Call Python Backend (Fast FIM)
-                    const response = await axios.post(`http://127.0.0.1:${port}/api/completion`, {
-                        prefix: prefix,
-                        suffix: suffix,
-                        file_path: document.fileName,
-                        language: document.languageId
-                    }, {
-                        signal: this.requestController.signal,
-                        timeout: 3000 // 3s Max timeout for completion
-                    });
-
-                    const completionText = response.data.completion;
-                    
-                    if (!completionText || completionText.trim().length === 0) {
-                        resolve(undefined);
-                        return;
-                    }
-
-                    // 5. Return Item
-                    const item = new vscode.InlineCompletionItem(
-                        completionText,
-                        new vscode.Range(position, position)
-                    );
-                    item.command = { command: 'gemini-swarm.acceptCompletion', title: 'Accept' };
-                    
-                    resolve([item]);
-
-                } catch (e) {
-                    // console.error(e);
-                    resolve(undefined);
-                }
-            }, 300); // 300ms Debounce
-        });
+    // 获取报错行附近的上下文（前后 5 行）
+    private getContext(document: vscode.TextDocument, range: vscode.Range): string {
+        const start = Math.max(0, range.start.line - 5);
+        const end = Math.min(document.lineCount - 1, range.end.line + 5);
+        const contextRange = new vscode.Range(start, 0, end, document.lineAt(end).text.length);
+        return document.getText(contextRange);
     }
 }
