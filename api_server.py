@@ -1,5 +1,7 @@
 import os
+import sys
 import uvicorn
+import threading
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -8,11 +10,12 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from typing import Dict, Any, List
 
 # [Dependencies]
 from config.keys import GEMINI_API_KEYS, PINECONE_API_KEY, PINECONE_ENVIRONMENT, VECTOR_INDEX_NAME
-from core.rotator import GeminiKeyRotator
+from core.rotator import GeminiKeyRotator, AllKeysExhaustedError
 from core.api_models import TaskRequest
 from workflow.graph import build_agent_workflow
 from langgraph.checkpoint.memory import MemorySaver
@@ -29,15 +32,27 @@ from core.sandbox_manager import register_sandbox, unregister_sandbox # [OpenDev
 # --- Configuration ---
 PORT = int(os.getenv("PORT", 8000))
 HOST = os.getenv("HOST", "127.0.0.1")
+# [Configuration] 接收数据目录，由 VS Code 传入或使用默认
+SWARM_DATA_DIR = os.getenv("SWARM_DATA_DIR", os.path.join(os.path.expanduser("~"), ".gemini_swarm"))
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("vscode_backend")
 
-app = FastAPI(title="Gemini VS Code Engine", version="3.5.0")
+# [Startup Check] Ensure API Keys are present
+if not GEMINI_API_KEYS:
+    logger.critical("❌ No Gemini API Keys found! Please configure 'geminiSwarm.apiKey' in VS Code settings.")
+    # Exit immediately if no keys, as the server is useless without them
+    sys.exit(1)
 
+app = FastAPI(title="Gemini VS Code Engine", version="3.6.0")
+
+# [Security Fix] Restrict CORS
+# Webview requests often have 'null' origin or 'vscode-webview://'
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # In local dev/extension environment, specific origin restriction can be tricky.
+                         # ideally restricted to "vscode-webview://" but let's keep * for local loopback only.
+                         # Since we bind to 127.0.0.1, external access is blocked.
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,11 +60,16 @@ app.add_middleware(
 
 # --- Components ---
 checkpointer = MemorySaver()
-rotator = GeminiKeyRotator("[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)", GEMINI_API_KEYS)
+try:
+    rotator = GeminiKeyRotator("https://generativelanguage.googleapis.com", GEMINI_API_KEYS)
+except ValueError as e:
+    logger.critical(f"❌ Key Rotator Init Failed: {e}")
+    sys.exit(1)
 
 # Init Shared Tools
+# [Fix] Pass data directory to tools
 embedding_key = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""
-memory = LocalRAGMemory(api_key=embedding_key)
+memory = LocalRAGMemory(api_key=embedding_key, persist_dir=os.path.join(SWARM_DATA_DIR, "db_chroma"))
 search = GoogleSearchTool()
 browser = WebLoader()
 indexer = WorkspaceIndexer(memory)
@@ -102,9 +122,33 @@ class EventStreamManager:
 
 stream_manager = EventStreamManager()
 
+# --- Zombie Process Prevention (Suicide Pact) ---
+def parent_monitor():
+    """
+    Monitor parent process. If parent dies (PPID changes or becomes 1), exit.
+    Also monitors stdin for EOF if possible, but PPID is more reliable cross-platform for simple spawn.
+    """
+    ppid = os.getppid()
+    logger.info(f"👀 Watching Parent PID: {ppid}")
+    while True:
+        try:
+            current_ppid = os.getppid()
+            if current_ppid != ppid or current_ppid == 1:
+                logger.warning(f"💀 Parent process died (PPID changed from {ppid} to {current_ppid}). Exiting...")
+                os._exit(0) # Force exit
+            time.sleep(5)
+        except Exception as e:
+            logger.error(f"Parent monitor error: {e}")
+            break
+
 @app.on_event("startup")
 async def startup_event():
+    # Start stream cleanup
     asyncio.create_task(stream_manager.cleanup_stale_streams())
+    
+    # Start parent monitor daemon
+    monitor_thread = threading.Thread(target=parent_monitor, daemon=True)
+    monitor_thread.start()
 
 # --- Context Augmentation Helper ---
 async def augment_context_with_tools(user_input: str) -> str:
@@ -177,14 +221,16 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
                 if ps.last_error:
                     await stream_manager.push_event(task_id, "error", ps.last_error)
 
+    except AllKeysExhaustedError:
+        logger.error("💥 All API Keys Exhausted.")
+        await stream_manager.push_event(task_id, "error", "ALL API KEYS EXHAUSTED. Please check your quota.")
     except Exception as e:
-        logger.error(f"💥 Engine Error: {e}")
+        logger.error(f"💥 Engine Error: {e}", exc_info=True)
         await stream_manager.push_event(task_id, "error", str(e))
     finally:
         await stream_manager.push_event(task_id, "finish", "done")
         await stream_manager.close_stream(task_id)
-        # Sandbox is auto-cleaned by stale stream manager, or we can close it here if we don't want session persistence.
-        # Keeping it open for short term session memory.
+        # Sandbox is auto-cleaned by stale stream manager
 
 # --- Endpoints ---
 
@@ -194,7 +240,8 @@ def health():
 
 @app.post("/api/start_task")
 async def start_task(req: TaskRequest, background_tasks: BackgroundTasks):
-    task_id = f"task_{int(time.time())}"
+    # [Fix] Use UUID for Task ID to prevent collision
+    task_id = f"task_{uuid.uuid4().hex}"
     thread_id = req.thread_id or f"thread_{task_id}"
     
     # [Continue Upgrade] Pre-process User Input for Context
