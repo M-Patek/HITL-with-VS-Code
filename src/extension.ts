@@ -9,15 +9,16 @@ import { ActionManager } from './managers/actionManager';
 let processManager: ProcessManager;
 
 export async function activate(context: vscode.ExtensionContext) {
-    console.log('Gemini Swarm Activated! 🐱');
+    // [Cleanup] Remove console.log in production
+    // console.log('Gemini Swarm Activated! 🐱'); 
 
     processManager = new ProcessManager();
     const securityManager = new SecurityManager();
     const dependencyManager = new DependencyManager();
     const chatProvider = new ChatViewProvider(context.extensionUri);
-    // [Fix] Use Singleton
     const actionManager = ActionManager.getInstance();
 
+    // 非阻塞检查 Docker
     securityManager.checkDockerAvailability();
 
     context.subscriptions.push(
