@@ -39,6 +39,18 @@ class CodingCrewNodes:
         
         print(f"   💰 Cost: ${cost:.6f} | Total: ${ps.cost_stats.total_cost:.4f}")
 
+    def _extract_json(self, text: str) -> Dict[str, Any]:
+        """[Robustness] Extract JSON from text using Regex"""
+        try:
+            # Find the outer-most JSON object
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+                return json.loads(json_str)
+        except:
+            pass
+        return None
+
     def coder_node(self, state: CodingCrewState) -> Dict[str, Any]:
         """[Coder] with Conversational Memory"""
         ps = self._get_project_state(state)
@@ -79,14 +91,11 @@ class CodingCrewNodes:
         
         # [Memory Fix] Inject Chat History
         contents = []
-        # Add history messages
         if ps.full_chat_history:
             for msg in ps.full_chat_history:
-                # Convert our internal format to Gemini format
                 role = "user" if msg['role'] == 'user' else "model"
                 contents.append({"role": role, "parts": [{"text": msg['content']}]})
         
-        # Add current prompt
         contents.append({"role": "user", "parts": [{"text": formatted_prompt}]})
         
         response_text, usage = self.rotator.call_gemini_with_rotation(
@@ -99,8 +108,7 @@ class CodingCrewNodes:
         self._update_cost(ps, usage)
         code = response_text or ""
         
-        # [Memory Update]
-        ps.full_chat_history.append({"role": "user", "content": user_input}) # Simplified, better to add prompt
+        ps.full_chat_history.append({"role": "user", "content": user_input})
         ps.full_chat_history.append({"role": "ai", "content": code})
 
         tool_call = MCPToolRegistry.parse_tool_call(response_text)
@@ -147,7 +155,14 @@ class CodingCrewNodes:
         sandbox = get_sandbox(task_id)
         if sandbox:
             stdout, stderr, images = sandbox.execute_code(code)
-            passed = (not stderr or "Error" not in stderr)
+            # [Logic Fix] Check for Mock Mode specific errors
+            passed = True
+            if "Error" in stderr or "Traceback" in stderr:
+                passed = False
+            # If Mock Mode failed explicitly
+            if "[System] Docker unavailable" in stderr:
+                 passed = False
+
             if images: ps.artifacts["image_artifacts"] = images
 
             return {
@@ -185,16 +200,14 @@ class CodingCrewNodes:
         
         status = "reject"
         feedback = "Parse Error"
-        report = {}
-        try:
-            start = response_text.find("{")
-            end = response_text.rfind("}")
-            if start != -1:
-                json_str = response_text[start:end+1]
-                report = json.loads(json_str)
-                status = report.get("status", "reject").lower()
-                feedback = report.get("feedback", "")
-        except: pass
+        
+        report = self._extract_json(response_text)
+        if report:
+            status = report.get("status", "reject").lower()
+            feedback = report.get("feedback", "")
+        else:
+            # [Logic Fix] Specific feedback for parse error
+            feedback = f"Reviewer failed to produce JSON. Raw Output: {response_text[:200]}"
         
         return {
             "functional_status": status,
@@ -207,7 +220,6 @@ class CodingCrewNodes:
         ps = self._get_project_state(state)
         
         code = state.get("generated_code", "")
-        # Simple Security Prompt
         prompt = f"""
         Role: Security Auditor
         Task: Analyze the following code for security vulnerabilities (RCE, XSS, SQL Injection, Path Traversal).
@@ -225,14 +237,10 @@ class CodingCrewNodes:
         self._update_cost(ps, usage)
         
         issues = "No issues."
-        try:
-            start = response_text.find("{")
-            end = response_text.rfind("}")
-            if start != -1:
-                data = json.loads(response_text[start:end+1])
-                if not data.get("safe", True):
-                    issues = f"🚨 VULNERABILITY: {data.get('issues')}"
-        except: pass
+        data = self._extract_json(response_text)
+        if data:
+            if not data.get("safe", True):
+                issues = f"🚨 VULNERABILITY: {data.get('issues')}"
         
         return {"security_feedback": issues}
 
@@ -260,12 +268,17 @@ class CodingCrewNodes:
         print(f"🔧 [Reflector] Fixing strategy...")
         ps = self._get_project_state(state)
         
+        # [Logic Fix] If reviewer failed to parse, don't ask for reflection on code, ask for format fix
+        review_feedback = state.get("review_feedback", "")
+        if "Reviewer failed to produce JSON" in review_feedback:
+            return {"reflection": "The Reviewer could not parse its own output. Please strictly follow the JSON format and retry the same code logic."}
+
         prompt_template = load_prompt(self.base_prompt_path, "reflection.md")
         formatted_prompt = prompt_template.format(
             user_input=ps.user_input,
             code=state.get("generated_code", ""),
             execution_stderr=state.get("execution_stderr", "")[:2000],
-            review_report=state.get("review_feedback", "")
+            review_report=review_feedback
         )
         
         response_text, usage = self.rotator.call_gemini_with_rotation(
