@@ -1,10 +1,27 @@
-from typing import List, Dict, Any, Optional
-from agents.common_types import AgentGraphState
+from typing import List, Dict, Any, Optional, TypedDict
+from core.models import ProjectState
 
-# [VS Code Refactor]
-# CodingCrewState 现在直接复用 AgentGraphState (TypedDict)
-# 这样子图可以直接访问 ProjectState 中的 file_context
-# 不再需要单独定义 class CodingCrewState(BaseAgentState)
-# 但为了保持类型提示和 graph 定义的兼容性，我们定义它等于 AgentGraphState
-
-CodingCrewState = AgentGraphState
+# [Optimization] 明确定义 TypedDict 以支持并行键
+class CodingCrewState(TypedDict, total=False):
+    project_state: ProjectState
+    iteration_count: int
+    generated_code: str
+    
+    # Executor outputs
+    execution_stdout: str
+    execution_stderr: str
+    execution_passed: bool
+    image_artifacts: List[Dict[str, str]]
+    
+    # [Parallel] Review outputs
+    functional_status: str
+    functional_feedback: str
+    security_feedback: str
+    
+    # Aggregated outputs
+    review_status: str
+    review_feedback: str
+    review_report: Dict[str, Any]
+    
+    reflection: str
+    final_output: str
