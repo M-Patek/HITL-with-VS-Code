@@ -19,6 +19,9 @@ const webExtensionConfig = {
   resolve: {
     mainFields: ['browser', 'module', 'main'], 
     extensions: ['.ts', '.js'], 
+    alias: {
+      '@': path.resolve(__dirname, 'src')
+    },
     fallback: {
       "path": require.resolve("path-browserify"),
       "child_process": false // Web worker 不支持子进程，这里只是声明
@@ -67,7 +70,10 @@ const nodeExtensionConfig = {
     },
     resolve: {
       mainFields: ['module', 'main'], 
-      extensions: ['.ts', '.js'], 
+      extensions: ['.ts', '.js'],
+      alias: {
+        '@': path.resolve(__dirname, 'src')
+      }
     },
     module: {
       rules: [
