@@ -10,21 +10,16 @@ export class DependencyManager {
         this.outputChannel = vscode.window.createOutputChannel("Gemini Installer");
     }
 
-    /**
-     * 执行 pip install -r requirements.txt
-     */
     public async installDependencies(context: vscode.ExtensionContext) {
         const config = vscode.workspace.getConfiguration('geminiSwarm');
-        const pythonPath = config.get<string>('pythonPath') || 'python';
         
-        // 定位打包后的后端目录
-        // 在开发环境是项目根目录，在生产环境是 dist/python_backend
-        // 我们通过检测当前上下文来判断
+        // [Optimization] 智能推断 Python 命令，防止 Linux/Mac 上 python2 的问题
+        const defaultPython = process.platform === 'win32' ? 'python' : 'python3';
+        const pythonPath = config.get<string>('pythonPath') || defaultPython;
+        
         let backendPath = context.asAbsolutePath(path.join('python_backend'));
         
-        // 如果插件根目录下没有 python_backend (开发模式可能直接在根目录)，则尝试直接用根目录
         if (!fs.existsSync(backendPath)) {
-            // 回退逻辑：假设用户是在源码模式运行，且 requirements.txt 在根目录
             if (fs.existsSync(context.asAbsolutePath('requirements.txt'))) {
                 backendPath = context.extensionPath;
             } else {
