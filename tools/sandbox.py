@@ -8,6 +8,7 @@ import os
 import uuid
 import re
 import shutil
+import sys
 from typing import Tuple, List, Optional, Dict
 
 logger = logging.getLogger("Tools-Sandbox")
@@ -37,7 +38,7 @@ class StatefulSandbox:
         if not self.docker_available: return
 
         try:
-            # 检查是否已存在同名容器
+            # Check existing
             existing = self.client.containers.list(all=True, filters={"name": self.container_name})
             if existing:
                 self.container = existing[0]
@@ -48,16 +49,17 @@ class StatefulSandbox:
 
             logger.info(f"🚀 Starting new session: {self.container_name}")
             
-            # [Security Fix] 强制只读挂载 (Read-Only Mount)
-            # 防止容器内的恶意代码 (如 rm -rf /workspace) 删除用户主机上的文件
             volumes = {}
             if self.workspace_root and os.path.exists(self.workspace_root):
-                volumes[self.workspace_root] = {'bind': '/workspace', 'mode': 'ro'}
-                logger.info(f"🛡️ Mounted workspace (Read-Only): {self.workspace_root} -> /workspace")
+                # [Windows Fix] Normalize path for Docker mount
+                # Docker on Windows requires absolute paths, which we have, but sometimes drive letters need casing adjustments.
+                # Usually python's os.path.abspath works fine.
+                host_path = os.path.abspath(self.workspace_root)
+                volumes[host_path] = {'bind': '/workspace', 'mode': 'ro'}
+                logger.info(f"🛡️ Mounted workspace (Read-Only): {host_path} -> /workspace")
             else:
                 logger.info("⚠️ No workspace root provided.")
 
-            # 使用 /tmp/sandbox_scratch 作为可写的工作目录，防止污染项目根目录
             self.container = self.client.containers.run(
                 self.image,
                 detach=True,
@@ -65,12 +67,11 @@ class StatefulSandbox:
                 name=self.container_name,
                 entrypoint="tail -f /dev/null", 
                 mem_limit="512m",
-                network_mode="none", # [Security Fix] 默认断网，除非明确需要联网
+                network_mode="none", 
                 volumes=volumes,
-                working_dir="/tmp" # 改变工作目录到临时区
+                working_dir="/tmp"
             )
             
-            # 初始化环境
             self.container.exec_run("mkdir -p /tmp/output")
 
         except Exception as e:
@@ -78,7 +79,6 @@ class StatefulSandbox:
             self.docker_available = False 
 
     def execute_code(self, code: str, timeout: int = 30) -> Tuple[str, str, List[Dict[str, str]]]:
-        """在当前会话中执行代码"""
         if not self.docker_available or not self.container:
             return (
                 "", 
@@ -88,15 +88,13 @@ class StatefulSandbox:
 
         try:
             run_id = str(uuid.uuid4())[:8]
-            # 脚本必须写入可写的临时目录，不能写入只读的 /workspace
             script_path = f"/tmp/script_{run_id}.py"
             plot_path = f"/tmp/plot_{run_id}.png"
             
             wrapped_code = self._wrap_code_with_plot_saving(code, plot_path)
             self._write_file_to_container("/tmp", f"script_{run_id}.py", wrapped_code)
             
-            # [Optimization] 使用 Python 内部超时机制而非依赖系统 timeout 命令
-            # 构造一个 Runner 脚本来执行目标脚本，从而实现跨平台超时
+            # [Optimization] Use Python runner for cross-platform timeout
             runner_code = f"""
 import subprocess
 import sys
@@ -121,19 +119,13 @@ except Exception as e:
             runner_path = f"/tmp/runner_{run_id}.py"
             self._write_file_to_container("/tmp", f"runner_{run_id}.py", runner_code)
 
-            # 执行 Runner
             exec_result = self.container.exec_run(f"python {runner_path}", workdir="/tmp")
             
             stdout = exec_result.output.decode("utf-8", errors="replace")
             stderr = ""
             
-            # 解析 Runner 的输出 (简单处理，实际 stdout/stderr 已混合，此处简化)
-            # 注意：Docker exec_run 的 output 是 stdout 和 stderr 合并的
-            # 真正的分离需要使用 socket attach，这里为了简化依然混合返回
-            
             images = self._extract_image_from_container(plot_path)
             
-            # 清理临时文件
             try:
                 self.container.exec_run(f"rm {script_path} {runner_path} {plot_path}")
             except: pass
@@ -148,7 +140,6 @@ except Exception as e:
              return "[System] Docker unavailable. Command execution skipped."
 
         try:
-            # 限制在 /tmp 下执行，或明确提示只读限制
             exec_result = self.container.exec_run(command, workdir="/tmp")
             return exec_result.output.decode("utf-8", errors="replace")
         except Exception as e:
