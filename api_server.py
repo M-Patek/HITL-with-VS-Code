@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Dict, Any
 
-# [Optimization] 正确导入 Keys
+# [Optimization] Correctly import Keys
 from config.keys import GEMINI_API_KEYS, PINECONE_API_KEY, PINECONE_ENVIRONMENT, VECTOR_INDEX_NAME
 from core.rotator import GeminiKeyRotator
 from core.api_models import TaskRequest
@@ -27,7 +27,7 @@ HOST = os.getenv("HOST", "127.0.0.1")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vscode_backend")
 
-app = FastAPI(title="Gemini VS Code Engine", version="3.0.0")
+app = FastAPI(title="Gemini VS Code Engine", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,35 +39,69 @@ app.add_middleware(
 
 # --- Components ---
 checkpointer = MemorySaver()
-# [Optimization] 初始化 Rotator 时传入所有 Key
-rotator = GeminiKeyRotator("[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)", GEMINI_API_KEYS)
+
+# [Critical Fix] URL Format was malformed (Markdown link detected). Fixed to pure URL string.
+# [Optimization] Initialize Rotator with all keys.
+rotator = GeminiKeyRotator("https://generativelanguage.googleapis.com", GEMINI_API_KEYS)
+
 memory = VectorMemoryTool(PINECONE_API_KEY, PINECONE_ENVIRONMENT, VECTOR_INDEX_NAME)
 search = GoogleSearchTool()
 
 # --- Build Graph ---
+# Note: The workflow builder now ensures the real rotator is passed to the Coding Crew
 workflow_app = build_agent_workflow(rotator, memory, search, checkpointer=checkpointer)
 
 # --- Stream Manager ---
 class EventStreamManager:
     def __init__(self):
         self.active_streams: Dict[str, asyncio.Queue] = {}
+        # [Optimization] Basic cleanup mechanism map (last_access)
+        self.stream_timestamps: Dict[str, float] = {}
 
     async def create_stream(self, task_id: str) -> asyncio.Queue:
         queue = asyncio.Queue()
         self.active_streams[task_id] = queue
+        self.stream_timestamps[task_id] = time.time()
         return queue
 
     async def push_event(self, task_id: str, event_type: str, data: Any):
         if task_id in self.active_streams:
-            payload = {"type": event_type, "timestamp": time.strftime("%H:%M:%S"), "data": data}
-            await self.active_streams[task_id].put(payload)
+            try:
+                payload = {"type": event_type, "timestamp": time.strftime("%H:%M:%S"), "data": data}
+                await self.active_streams[task_id].put(payload)
+                self.stream_timestamps[task_id] = time.time()
+            except Exception as e:
+                logger.error(f"Failed to push event to {task_id}: {e}")
 
     async def close_stream(self, task_id: str):
         if task_id in self.active_streams:
             await self.active_streams[task_id].put(None)
-            del self.active_streams[task_id]
+            # We don't delete immediately to allow generator to finish, handled in generator logic or cleanup task
+            # But strictly speaking, we can remove it after a short delay or let generator remove it.
+
+    # [Optimization] Cleanup stale streams to prevent memory leaks
+    async def cleanup_stale_streams(self):
+        while True:
+            await asyncio.sleep(600) # Check every 10 mins
+            now = time.time()
+            to_remove = []
+            for tid, ts in self.stream_timestamps.items():
+                if now - ts > 3600: # 1 hour timeout
+                    to_remove.append(tid)
+            
+            for tid in to_remove:
+                if tid in self.active_streams:
+                    del self.active_streams[tid]
+                if tid in self.stream_timestamps:
+                    del self.stream_timestamps[tid]
+                logger.info(f"🧹 Cleaned up stale stream: {tid}")
 
 stream_manager = EventStreamManager()
+
+# Start cleanup task on startup
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(stream_manager.cleanup_stale_streams())
 
 # --- Background Runner ---
 async def run_workflow_background(task_id: str, initial_input: Dict, config: Dict):
@@ -81,16 +115,16 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
                 
                 # Push Code Artifacts
                 if ps.code_blocks:
+                    # Get the latest code block (simplistic approach)
                     latest_code = list(ps.code_blocks.values())[-1]
                     await stream_manager.push_event(task_id, "code_generated", {
                         "content": latest_code,
                         "node": "coding_crew"
                     })
                 
-                # [Optimization] Push Image Artifacts (修复图片不可见问题)
+                # Push Image Artifacts
                 if ps.artifacts and "image_artifacts" in ps.artifacts:
                     images = ps.artifacts["image_artifacts"]
-                    # 避免重复发送，实际生产环境可加指纹校验，这里简单起见每次有更新都推
                     await stream_manager.push_event(task_id, "image_generated", {
                         "images": images
                     })
@@ -104,6 +138,7 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
         await stream_manager.push_event(task_id, "error", str(e))
     finally:
         await stream_manager.push_event(task_id, "finish", "done")
+        # Ensure stream is closed
         await stream_manager.close_stream(task_id)
 
 # --- Endpoints ---
@@ -136,16 +171,35 @@ async def stream_events(task_id: str, request: Request):
     async def event_generator():
         queue = stream_manager.active_streams.get(task_id)
         if not queue:
+            yield f"event: error\ndata: \"Stream not found or expired\"\n\n"
             yield f"event: finish\ndata: end\n\n"
             return
 
-        while True:
-            if await request.is_disconnected(): break
-            payload = await queue.get()
-            if payload is None:
-                yield f"event: finish\ndata: end\n\n"
-                break
-            yield f"event: {payload['type']}\ndata: {json.dumps(payload['data'])}\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    logger.info(f"Client disconnected from stream {task_id}")
+                    break
+                
+                # Wait for data with timeout to allow checking disconnect
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
+                if payload is None:
+                    yield f"event: finish\ndata: end\n\n"
+                    break
+                
+                yield f"event: {payload['type']}\ndata: {json.dumps(payload['data'])}\n\n"
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+        finally:
+            # Clean up the queue reference when client disconnects or finishes
+            if task_id in stream_manager.active_streams:
+                del stream_manager.active_streams[task_id]
+            if task_id in stream_manager.stream_timestamps:
+                del stream_manager.stream_timestamps[task_id]
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
