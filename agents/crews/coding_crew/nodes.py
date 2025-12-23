@@ -160,10 +160,8 @@ class CodingCrewNodes:
         feedback = "Parse Error"
         report = {}
         try:
-            # Old Greedy: r"(\{.*\})" 
-            # New Non-Greedy: r"(\{.*?\})" or find the last closed block
-            # 简单策略：非贪婪匹配第一个完整的 JSON 对象，或者尝试 rjson 等库
-            # 这里优化为：找到第一个 { 和最后一个 }
+            # 尝试提取第一个 { 和最后一个 } 之间的内容，使用非贪婪匹配策略辅助
+            # 简单策略：先找第一个 {，再找最后一个 }
             start = response.find("{")
             end = response.rfind("}")
             
@@ -181,87 +179,6 @@ class CodingCrewNodes:
         except Exception as e:
             print(f"   ⚠️ Review JSON Parse Failed: {e}")
             # Fallback strategy?
-            pass
-        
-        print(f"   📝 Review Status: {status.upper()}")
-        return {
-            "review_status": status,
-            "review_feedback": feedback,
-            "review_report": report
-        }
-
-    def reflector_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Reflector] Root Cause Analysis"""
-        print(f"🔧 [Reflector] Fixing strategy...")
-        ps = self._get_project_state(state)
-        
-        # [Optimization] 日志截断
-        stderr = state.get("execution_stderr", "None")
-        if len(stderr) > 2000: stderr = stderr[:2000] + "...(truncated)"
-
-        prompt_template = load_prompt(self.base_prompt_path, "reflection.md")
-        formatted_prompt = prompt_template.format(
-            user_input=ps.user_input,
-            code=state.get("generated_code", ""),
-            execution_stderr=stderr,
-            review_report=json.dumps(state.get("review_report", {}))
-        )
-        
-        response = self.rotator.call_gemini_with_rotation(
-            model_name=GEMINI_MODEL_NAME,
-            contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
-            system_instruction="Tech Lead Fixer.",
-            complexity="complex"
-        )
-        return {"reflection": response}
-
-    def summarizer_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Summarizer]"""
-        print(f"📝 [Summarizer] Finalizing...")
-        ps = self._get_project_state(state)
-        
-        prompt_template = load_prompt(self.base_prompt_path, "summarizer.md")
-        formatted_prompt = prompt_template.format(
-            user_input=ps.user_input,
-            code=state.get("generated_code", ""),
-            execution_output=state.get("execution_stdout", "")[:1000] # 截断
-        )
-        
-        response = self.rotator.call_gemini_with_rotation(
-            model_name=GEMINI_MODEL_NAME,
-            contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
-            system_instruction="Summary.",
-            complexity="simple"
-        )
-        
-        ps.final_report = response
-        return {"final_output": response, "project_state": ps}
-            stderr=stderr
-        )
-        
-        response = self.rotator.call_gemini_with_rotation(
-            model_name=GEMINI_MODEL_NAME,
-            contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
-            system_instruction="Strict JSON reviewer.",
-            complexity="complex"
-        )
-        
-        # [Optimization] 更稳健的 JSON 解析
-        status = "reject"
-        feedback = "Parse Error"
-        report = {}
-        try:
-            # 尝试提取第一个 { 和最后一个 } 之间的内容
-            json_match = re.search(r"(\{.*\})", response, re.DOTALL)
-            json_str = json_match.group(1) if json_match else response
-            # 清理可能的 markdown 标记
-            json_str = json_str.replace("```json", "").replace("```", "")
-            
-            report = json.loads(json_str)
-            status = report.get("status", "reject").lower()
-            feedback = report.get("feedback", "")
-        except Exception as e:
-            print(f"   ⚠️ Review JSON Parse Failed: {e}")
             pass
         
         print(f"   📝 Review Status: {status.upper()}")
