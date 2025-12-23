@@ -26,7 +26,6 @@ class BrowserTool:
     def _is_safe_url(self, url: str) -> bool:
         """
         [Security] Validates URL to prevent SSRF (Server-Side Request Forgery).
-        Checks if the domain resolves to a private or loopback IP.
         """
         try:
             parsed = urlparse(url)
@@ -41,7 +40,6 @@ class BrowserTool:
             # Resolve IP
             try:
                 ip_list = socket.getaddrinfo(hostname, None)
-                # Check all resolved IPs
                 for item in ip_list:
                     ip_addr = item[4][0]
                     ip_obj = ipaddress.ip_address(ip_addr)
@@ -65,7 +63,6 @@ class BrowserTool:
 
         try:
             # [Fix] SSRF Defense: Disable redirects
-            # Prevents open redirects from taking the scraper to an internal IP after the initial check.
             response = requests.get(
                 url, 
                 headers=self.headers, 
@@ -89,8 +86,7 @@ class BrowserTool:
         if not PLAYWRIGHT_AVAILABLE:
             return "Error: Playwright not installed."
 
-        # [Fix] Security: Re-validate URL for Playwright
-        # Crucial: Explicitly check scheme to block 'file://' access (LFI)
+        # [Fix] Security: Re-validate URL for Playwright & Check Scheme
         if not self._is_safe_url(url):
              logger.warning(f"🚫 Blocked screenshot request for unsafe URL: {url}")
              return "Error: URL blocked by security policy."
