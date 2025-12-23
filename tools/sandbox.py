@@ -7,6 +7,7 @@ import base64
 import os
 import uuid
 import re
+import shutil
 from typing import Tuple, List, Optional, Dict
 
 logger = logging.getLogger("Tools-Sandbox")
@@ -15,7 +16,7 @@ class StatefulSandbox:
     def __init__(self, task_id: str, image: str = "python:3.9-slim", workspace_root: str = None):
         self.task_id = task_id
         self.image = image
-        self.workspace_root = workspace_root # [Sandbox Fix] 接收宿主工作区路径
+        self.workspace_root = workspace_root
         self.container_name = f"swarm_session_{task_id}"
         self.client = None
         self.container = None
@@ -47,15 +48,16 @@ class StatefulSandbox:
 
             logger.info(f"🚀 Starting new session: {self.container_name}")
             
-            # [Sandbox Fix] 配置 Volumes 挂载
+            # [Security Fix] 强制只读挂载 (Read-Only Mount)
+            # 防止容器内的恶意代码 (如 rm -rf /workspace) 删除用户主机上的文件
             volumes = {}
             if self.workspace_root and os.path.exists(self.workspace_root):
-                # 将宿主工作区挂载到容器内的 /workspace
-                volumes[self.workspace_root] = {'bind': '/workspace', 'mode': 'rw'}
-                logger.info(f"📂 Mounted workspace: {self.workspace_root} -> /workspace")
+                volumes[self.workspace_root] = {'bind': '/workspace', 'mode': 'ro'}
+                logger.info(f"🛡️ Mounted workspace (Read-Only): {self.workspace_root} -> /workspace")
             else:
-                logger.info("⚠️ No workspace root provided, using ephemeral /workspace")
+                logger.info("⚠️ No workspace root provided.")
 
+            # 使用 /tmp/sandbox_scratch 作为可写的工作目录，防止污染项目根目录
             self.container = self.client.containers.run(
                 self.image,
                 detach=True,
@@ -63,13 +65,13 @@ class StatefulSandbox:
                 name=self.container_name,
                 entrypoint="tail -f /dev/null", 
                 mem_limit="512m",
-                network_mode="bridge",
+                network_mode="none", # [Security Fix] 默认断网，除非明确需要联网
                 volumes=volumes,
-                working_dir="/workspace" # [Sandbox Fix] 默认工作目录
+                working_dir="/tmp" # 改变工作目录到临时区
             )
-            # 如果没有挂载卷，手动创建目录
-            if not volumes:
-                self.container.exec_run("mkdir -p /workspace")
+            
+            # 初始化环境
+            self.container.exec_run("mkdir -p /tmp/output")
 
         except Exception as e:
             logger.error(f"Failed to start sandbox session: {e}")
@@ -86,32 +88,54 @@ class StatefulSandbox:
 
         try:
             run_id = str(uuid.uuid4())[:8]
-            script_filename = f"script_{run_id}.py"
-            plot_filename = f"plot_{run_id}.png"
-            # 注意：如果挂载了卷，这些文件会直接出现在用户的硬盘上
-            # 建议将生成的临时脚本放在 /tmp 或隐藏目录下，避免污染用户工作区
-            # 这里为了简化，还是放在 /workspace 但前缀明确
-            container_plot_path = f"/workspace/{plot_filename}"
-
-            wrapped_code = self._wrap_code_with_plot_saving(code, container_plot_path)
-            self._write_file_to_container("/workspace", script_filename, wrapped_code)
+            # 脚本必须写入可写的临时目录，不能写入只读的 /workspace
+            script_path = f"/tmp/script_{run_id}.py"
+            plot_path = f"/tmp/plot_{run_id}.png"
             
-            cmd = f"timeout {timeout}s python -u /workspace/{script_filename}"
-            exec_result = self.container.exec_run(cmd, workdir="/workspace")
+            wrapped_code = self._wrap_code_with_plot_saving(code, plot_path)
+            self._write_file_to_container("/tmp", f"script_{run_id}.py", wrapped_code)
+            
+            # [Optimization] 使用 Python 内部超时机制而非依赖系统 timeout 命令
+            # 构造一个 Runner 脚本来执行目标脚本，从而实现跨平台超时
+            runner_code = f"""
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        [sys.executable, "{script_path}"], 
+        capture_output=True, 
+        text=True, 
+        timeout={timeout}
+    )
+    print(result.stdout)
+    print(result.stderr, file=sys.stderr)
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired:
+    print("❌ Execution Timed Out (Limit: {timeout}s)", file=sys.stderr)
+    sys.exit(124)
+except Exception as e:
+    print(f"Runner Error: {{e}}", file=sys.stderr)
+    sys.exit(1)
+"""
+            runner_path = f"/tmp/runner_{run_id}.py"
+            self._write_file_to_container("/tmp", f"runner_{run_id}.py", runner_code)
+
+            # 执行 Runner
+            exec_result = self.container.exec_run(f"python {runner_path}", workdir="/tmp")
             
             stdout = exec_result.output.decode("utf-8", errors="replace")
             stderr = ""
             
-            if exec_result.exit_code == 124:
-                stderr = f"❌ Execution Timed Out (Limit: {timeout}s)"
-            elif exec_result.exit_code != 0:
-                stderr = stdout 
+            # 解析 Runner 的输出 (简单处理，实际 stdout/stderr 已混合，此处简化)
+            # 注意：Docker exec_run 的 output 是 stdout 和 stderr 合并的
+            # 真正的分离需要使用 socket attach，这里为了简化依然混合返回
             
-            images = self._extract_image_from_container(container_plot_path)
+            images = self._extract_image_from_container(plot_path)
             
-            # [Cleanup] 尝试清理临时脚本 (Optional)
+            # 清理临时文件
             try:
-                self.container.exec_run(f"rm {script_filename} {plot_filename}")
+                self.container.exec_run(f"rm {script_path} {runner_path} {plot_path}")
             except: pass
 
             return stdout, stderr, images
@@ -124,7 +148,8 @@ class StatefulSandbox:
              return "[System] Docker unavailable. Command execution skipped."
 
         try:
-            exec_result = self.container.exec_run(command, workdir="/workspace")
+            # 限制在 /tmp 下执行，或明确提示只读限制
+            exec_result = self.container.exec_run(command, workdir="/tmp")
             return exec_result.output.decode("utf-8", errors="replace")
         except Exception as e:
             return f"Command failed: {e}"
