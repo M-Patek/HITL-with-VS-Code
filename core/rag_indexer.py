@@ -1,6 +1,7 @@
 import os
 import logging
-from typing import List
+import fnmatch
+from typing import List, Set
 
 logger = logging.getLogger("RAG-Indexer")
 
@@ -10,9 +11,57 @@ class WorkspaceIndexer:
     """
     def __init__(self, memory_tool):
         self.memory = memory_tool
-        # 忽略列表
-        self.ignore_dirs = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.vscode', 'venv', 'env', '.idea', '__MACOSX'}
-        self.ignore_exts = {'.png', '.jpg', '.jpeg', '.gif', '.ico', '.pyc', '.lock', '.pdf', '.svg', '.exe', '.dll'}
+        # 默认忽略列表
+        self.default_ignore_dirs = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.vscode', 'venv', 'env', '.idea', '__MACOSX', 'coverage'}
+        self.ignore_exts = {'.png', '.jpg', '.jpeg', '.gif', '.ico', '.pyc', '.lock', '.pdf', '.svg', '.exe', '.dll', '.class', '.o'}
+
+    def _load_gitignore(self, root_path: str) -> List[str]:
+        """
+        [Smart Indexing] 读取 .gitignore 模式
+        """
+        patterns = []
+        gitignore_path = os.path.join(root_path, '.gitignore')
+        if os.path.exists(gitignore_path):
+            try:
+                with open(gitignore_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            patterns.append(line)
+                logger.info(f"📜 Loaded {len(patterns)} patterns from .gitignore")
+            except Exception as e:
+                logger.warning(f"Failed to read .gitignore: {e}")
+        return patterns
+
+    def _is_ignored(self, rel_path: str, gitignore_patterns: List[str]) -> bool:
+        """
+        检查文件是否应被忽略 (fnmatch implementation)
+        """
+        # 1. Check default hardcoded rules first (Optimization)
+        parts = rel_path.split(os.sep)
+        for part in parts:
+            if part in self.default_ignore_dirs:
+                return True
+        
+        ext = os.path.splitext(rel_path)[1].lower()
+        if ext in self.ignore_exts:
+            return True
+
+        # 2. Check gitignore patterns
+        # fnmatch is not perfect for .gitignore (no negation support, etc.) but good enough for simple cases
+        for pattern in gitignore_patterns:
+            # Handle directory patterns ending with /
+            if pattern.endswith('/'):
+                pattern = pattern.rstrip('/')
+                # If any part of path matches directory pattern
+                if any(fnmatch.fnmatch(p, pattern) for p in parts):
+                    return True
+            
+            # Match full relative path or filename
+            if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(os.path.basename(rel_path), pattern):
+                return True
+                
+        return False
 
     def index_workspace(self, root_path: str):
         """全量索引 (建议在后台运行)"""
@@ -21,28 +70,33 @@ class WorkspaceIndexer:
             return
 
         logger.info(f"🕵️ Starting workspace indexing: {root_path}")
+        gitignore_patterns = self._load_gitignore(root_path)
         
         docs = []
         metas = []
         ids = []
 
         for root, dirs, files in os.walk(root_path):
-            # 过滤目录
-            dirs[:] = [d for d in dirs if d not in self.ignore_dirs]
+            # 过滤目录 (In-place modification for os.walk)
+            # 这里先用 default_ignore_dirs 快速过滤，细粒度过滤在 file loop 中做
+            dirs[:] = [d for d in dirs if d not in self.default_ignore_dirs]
             
             for file in files:
-                ext = os.path.splitext(file)[1].lower()
-                if ext in self.ignore_exts:
-                    continue
-                
                 file_path = os.path.join(root, file)
                 rel_path = os.path.relpath(file_path, root_path)
                 
+                # [Smart Indexing] Check ignore rules
+                if self._is_ignored(rel_path, gitignore_patterns):
+                    continue
+                
                 try:
+                    # [Safety] Skip large files > 500KB
+                    if os.path.getsize(file_path) > 500 * 1024:
+                        continue
+
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
                         
-                    # [Optimization] 更智能的切片逻辑
                     chunks = self._chunk_text_smart(content, chunk_size=1000, overlap=100)
                     
                     for i, chunk in enumerate(chunks):
@@ -73,11 +127,9 @@ class WorkspaceIndexer:
         
         for line in lines:
             if current_length + len(line) > chunk_size and current_chunk:
-                # 当前块满了，保存
                 full_chunk = "".join(current_chunk)
                 chunks.append(full_chunk)
                 
-                # 处理 Overlap: 保留末尾几行作为下一块的开头
                 overlap_buffer = []
                 overlap_len = 0
                 for prev_line in reversed(current_chunk):
