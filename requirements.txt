@@ -6,3 +6,12 @@ httpx
 requests
 docker>=7.0.0
 tavily-python
+
+[Aider]
+
+tree-sitter>=0.20.0
+tree-sitter-languages>=1.10.0
+
+[Continue Soul]
+
+beautifulsoup4
