@@ -35,19 +35,35 @@ export class DependencyManager {
 
     private async createVenv(cwd: string) {
         this.outputChannel.appendLine(`[Installer] Creating venv in ${cwd}...`);
-        // 尝试使用系统 python 创建 venv
         const sysPython = process.platform === 'win32' ? 'python' : 'python3';
         
         return new Promise<void>((resolve, reject) => {
-            cp.exec(`${sysPython} -m venv venv`, { cwd }, (err, stdout, stderr) => {
-                if (err) {
-                    this.outputChannel.appendLine(`[Error] Failed to create venv: ${stderr}`);
-                    vscode.window.showErrorMessage('Failed to create Python virtual environment.');
-                    reject(err);
-                } else {
+            // [Security Fix] 使用 spawn 替代 exec
+            const venvProcess = cp.spawn(sysPython, ['-m', 'venv', 'venv'], { cwd });
+
+            venvProcess.stdout.on('data', (data) => {
+                this.outputChannel.append(`[Venv] ${data}`);
+            });
+
+            venvProcess.stderr.on('data', (data) => {
+                this.outputChannel.append(`[Venv Err] ${data}`);
+            });
+
+            venvProcess.on('close', (code) => {
+                if (code === 0) {
                     this.outputChannel.appendLine('[Installer] Venv created.');
                     resolve();
+                } else {
+                    const msg = `Failed to create venv, exit code: ${code}`;
+                    this.outputChannel.appendLine(`[Error] ${msg}`);
+                    vscode.window.showErrorMessage('Failed to create Python virtual environment.');
+                    reject(new Error(msg));
                 }
+            });
+
+            venvProcess.on('error', (err) => {
+                this.outputChannel.appendLine(`[Error] Spawn failed: ${err.message}`);
+                reject(err);
             });
         });
     }
@@ -57,6 +73,7 @@ export class DependencyManager {
         this.outputChannel.appendLine(`[Installer] Installing requirements using ${pythonBin}...`);
 
         return new Promise<void>((resolve, reject) => {
+            // spawn 已经是安全的数组传参
             const args = ['-m', 'pip', 'install', '-r', 'requirements.txt'];
             const proc = cp.spawn(pythonBin, args, { cwd });
 
