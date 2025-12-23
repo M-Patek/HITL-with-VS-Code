@@ -1,19 +1,19 @@
 import * as vscode from 'vscode';
 import { ContextManager } from '../managers/contextManager';
-import { ActionManager } from '../managers/actionManager'; // [New]
+import { ActionManager } from '../managers/actionManager';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     public static readonly viewType = 'gemini-swarm.chatView';
     private _view?: vscode.WebviewView;
     private _contextManager: ContextManager;
-    private _actionManager: ActionManager; // [New]
+    private _actionManager: ActionManager;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
     ) { 
         this._contextManager = new ContextManager();
-        this._actionManager = new ActionManager(); // [New]
+        this._actionManager = new ActionManager();
     }
 
     public resolveWebviewView(
@@ -43,7 +43,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case 'insertCode': {
-                    // [Refactor] 使用 ActionManager
                     const editor = vscode.window.activeTextEditor;
                     if (editor) {
                         await this._actionManager.insertCode(editor, data.code);
@@ -52,8 +51,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
-                case 'run_terminal': { // [New] 前端请求执行命令
+                case 'run_terminal': {
                     this._actionManager.runInTerminal(data.command);
+                    break;
+                }
+                case 'apply_file_change': {
+                    await this._actionManager.applyFileChange(data.path, data.content);
+                    break;
+                }
+                case 'view_diff': { // [Roo Code] Handle Diff Request
+                    await this._actionManager.previewFileDiff(data.path, data.content);
                     break;
                 }
                 case 'onInfo': {
@@ -64,12 +71,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    /**
-     * 外部触发修复流程 (由 QuickFix 调用)
-     */
     public triggerFixFlow(errorMsg: string, errorContext: string) {
         if (this._view) {
-            this._view.show?.(true); // 激活侧边栏
+            this._view.show?.(true); 
             this.sendToWebview('trigger_fix', {
                 error: errorMsg,
                 context: errorContext
@@ -86,20 +90,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private async handleGetContext() {
         try {
             const contextData = await this._contextManager.collectFullContext();
-            this.sendToWebview('context_response', contextData);
+            
+            let workspaceRoot = "";
+            if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
+            }
+
+            this.sendToWebview('context_response', {
+                ...contextData,
+                workspace_root: workspaceRoot
+            });
+
         } catch (error: any) {
             console.error('Context collection failed:', error);
             this.sendToWebview('context_response', { 
-                file_context: null, project_structure: "", diagnostics: "" 
+                file_context: null, 
+                project_structure: "", 
+                diagnostics: "",
+                workspace_root: "" 
             });
         }
     }
 
     private _getHtmlForWebview(webview: vscode.Webview) {
-        // ... (HTML 生成逻辑保持不变，只需确保引入了 media/main.js)
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'main.js'));
         const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'styles.css'));
-        // (为节省篇幅，此处省略重复的 HTML 模板字符串，内容同上一阶段)
+        
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -114,26 +130,68 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div id="app">
         <div id="chat-container" ref="chatContainer">
             <div v-if="messages.length === 0" class="message system">
-                🐱 <b>Gemini Swarm Engine</b><br>
+                🐱 <b>Gemini Swarm Engine (Roo Code Style)</b><br>
                 <span>Ready to Code.</span>
             </div>
+            
             <div v-for="(msg, idx) in messages" :key="idx" :class="['message', msg.role]">
-                <div v-if="msg.type !== 'code'">{{ msg.content }}</div>
-                <div v-else class="artifact-card">
+                
+                <div v-if="msg.type !== 'code' && msg.type !== 'tool_proposal'">{{ msg.content }}</div>
+
+                <div v-else-if="msg.type === 'code'" class="artifact-card">
                     <div class="artifact-header">
-                        <span>CODE GENERATED</span>
+                        <span>CODE SNIPPET</span>
                         <div class="actions">
                             <button class="icon-btn" @click="insertCode(msg.content)">INSERT 📥</button>
-                            <!-- [New] 未来可扩展 Diff 按钮 -->
                         </div>
                     </div>
                     <div class="artifact-content">{{ msg.content }}</div>
                 </div>
+
+                <!-- Tool Proposal Card -->
+                <div v-else-if="msg.type === 'tool_proposal'" class="artifact-card tool-card">
+                    <div class="artifact-header tool-header">
+                        <span>🛠️ {{ msg.label }}</span>
+                    </div>
+                    <div class="artifact-content">
+                        <div v-if="msg.content.tool === 'write_to_file'">
+                            <strong>Path:</strong> {{ msg.content.params.path }}<br>
+                            <pre class="code-preview">{{ msg.content.params.content.slice(0, 150) }}...</pre>
+                        </div>
+                        <div v-if="msg.content.tool === 'execute_command'">
+                            <strong>Command:</strong> <code>{{ msg.content.params.command }}</code>
+                        </div>
+                    </div>
+                    
+                    <div class="tool-actions" v-if="!msg.approved && !msg.rejected">
+                        <!-- [Roo Code] View Diff Button -->
+                        <button v-if="msg.content.tool === 'write_to_file'" class="diff-btn" @click="viewDiff(msg.content)">
+                            👀 View Diff
+                        </button>
+                        
+                        <button class="approve-btn" @click="approveTool(idx, msg.content)">
+                            ✅ Approve
+                        </button>
+                        <button class="reject-btn" @click="rejectTool(idx)">
+                            ❌ Reject
+                        </button>
+                    </div>
+                    
+                    <div class="tool-status" v-if="msg.approved">
+                        ✅ Approved & Executed
+                    </div>
+                    <div class="tool-status" v-if="msg.rejected">
+                        ❌ Rejected
+                    </div>
+                </div>
+
             </div>
+
             <div v-if="isProcessing" class="message system">
                 <span>Thinking... <span class="loading-dots">...</span></span>
             </div>
         </div>
+
         <div id="input-area">
             <textarea v-model="userInput" @keydown.enter.prevent="startTask" placeholder="Ask Coding Crew..." rows="3" :disabled="isProcessing"></textarea>
             <button @click="startTask" :disabled="isProcessing || !userInput">{{ isProcessing ? 'Processing...' : 'Send 🚀' }}</button>
