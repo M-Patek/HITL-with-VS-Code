@@ -1,6 +1,7 @@
 import re
 import json
 import os
+import asyncio
 from typing import Dict, Any
 
 from core.utils import load_prompt
@@ -23,7 +24,6 @@ class CodingCrewNodes:
         [Coder] VS Code Aware
         """
         ps = self._get_project_state(state)
-        # 兼容逻辑：如果 ProjectState 里没存 iteration，则从 state 顶层取（第一次可能没有）
         iteration = state.get("iteration_count", 0) + 1
         
         print(f"\n💻 [Coder] VS Code Engine Activated (Iter: {iteration})")
@@ -36,6 +36,11 @@ class CodingCrewNodes:
         
         if ps.file_context:
             fc = ps.file_context
+            # [Optimization] 上下文截断，防止 Token 爆炸
+            content = fc.content
+            if len(content) > 20000:
+                content = content[:10000] + "\n...[Content Truncated]...\n" + content[-10000:]
+
             file_ctx_str = f"""
 ### 📄 Current File Context (VS Code)
 - **Filename**: `{fc.filename}`
@@ -47,11 +52,10 @@ class CodingCrewNodes:
 ```
 - **Full Content**:
 ```
-{fc.content}
+{content}
 ```
 """
         
-        # Feedback logic
         reflection = state.get("reflection", "")
         raw_feedback = state.get("review_feedback", "")
         combined_feedback = raw_feedback
@@ -64,7 +68,6 @@ class CodingCrewNodes:
             feedback=combined_feedback or "None"
         )
         
-        # Call Gemini
         response = self.rotator.call_gemini_with_rotation(
             model_name=GEMINI_MODEL_NAME,
             contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
@@ -73,7 +76,6 @@ class CodingCrewNodes:
         )
         
         code = response or ""
-        # 尝试提取代码块
         match = re.search(r"```python(.*?)```", response, re.DOTALL)
         if match:
             code = match.group(1).strip()
@@ -81,31 +83,39 @@ class CodingCrewNodes:
              match = re.search(r"```(.*?)```", response, re.DOTALL)
              if match: code = match.group(1).strip()
 
-        # Update ProjectState with generated code for history
         ps.code_blocks["coder"] = code
         
         return {
-            "project_state": ps, # Pass updated project state
+            "project_state": ps, 
             "generated_code": code,
             "iteration_count": iteration,
             "reflection": ""
         }
 
-    def executor_node(self, state: CodingCrewState) -> Dict[str, Any]:
-        """[Executor] Sandbox Runner"""
+    async def executor_node(self, state: CodingCrewState) -> Dict[str, Any]:
+        """[Executor] Sandbox Runner (Async Wrapper)"""
+        # [Optimization] 异步化：防止 Docker 阻塞主线程
         print(f"🚀 [Executor] Sandbox Running...")
         code = state.get("generated_code", "")
+        ps = self._get_project_state(state)
         
         if not code:
             return {"execution_passed": False, "execution_stderr": "No code."}
             
-        result = run_python_code(code)
+        # 获取当前的 Event Loop 执行阻塞操作
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, run_python_code, code)
         
         passed = (result["returncode"] == 0)
         status_icon = "✅" if passed else "❌"
         print(f"   {status_icon} Exit Code: {result['returncode']}")
         
+        # [Optimization] 将图片产物存入 ProjectState
+        if result.get("images"):
+             ps.artifacts["image_artifacts"] = result["images"]
+
         return {
+            "project_state": ps,
             "execution_stdout": result["stdout"],
             "execution_stderr": result["stderr"],
             "execution_passed": passed,
@@ -117,12 +127,18 @@ class CodingCrewNodes:
         print(f"🧐 [Reviewer] Analyzing...")
         ps = self._get_project_state(state)
         
+        # [Optimization] 日志截断
+        stdout = state.get("execution_stdout", "")
+        stderr = state.get("execution_stderr", "")
+        if len(stdout) > 2000: stdout = stdout[:2000] + "...(truncated)"
+        if len(stderr) > 2000: stderr = stderr[:2000] + "...(truncated)"
+
         prompt_template = load_prompt(self.base_prompt_path, "reviewer.md")
         formatted_prompt = prompt_template.format(
             user_input=ps.user_input,
             code=state.get("generated_code", ""),
-            stdout=state.get("execution_stdout", ""),
-            stderr=state.get("execution_stderr", "")
+            stdout=stdout,
+            stderr=stderr
         )
         
         response = self.rotator.call_gemini_with_rotation(
@@ -132,17 +148,23 @@ class CodingCrewNodes:
             complexity="complex"
         )
         
-        # Parse JSON logic (Simplified for brevity)
+        # [Optimization] 更稳健的 JSON 解析
         status = "reject"
         feedback = "Parse Error"
         report = {}
         try:
-            match = re.search(r"```json(.*?)```", response, re.DOTALL)
-            json_str = match.group(1).strip() if match else response
+            # 尝试提取第一个 { 和最后一个 } 之间的内容
+            json_match = re.search(r"(\{.*\})", response, re.DOTALL)
+            json_str = json_match.group(1) if json_match else response
+            # 清理可能的 markdown 标记
+            json_str = json_str.replace("```json", "").replace("```", "")
+            
             report = json.loads(json_str)
             status = report.get("status", "reject").lower()
             feedback = report.get("feedback", "")
-        except: pass
+        except Exception as e:
+            print(f"   ⚠️ Review JSON Parse Failed: {e}")
+            pass
         
         print(f"   📝 Review Status: {status.upper()}")
         return {
@@ -156,11 +178,15 @@ class CodingCrewNodes:
         print(f"🔧 [Reflector] Fixing strategy...")
         ps = self._get_project_state(state)
         
+        # [Optimization] 日志截断
+        stderr = state.get("execution_stderr", "None")
+        if len(stderr) > 2000: stderr = stderr[:2000] + "...(truncated)"
+
         prompt_template = load_prompt(self.base_prompt_path, "reflection.md")
         formatted_prompt = prompt_template.format(
             user_input=ps.user_input,
             code=state.get("generated_code", ""),
-            execution_stderr=state.get("execution_stderr", "None"),
+            execution_stderr=stderr,
             review_report=json.dumps(state.get("review_report", {}))
         )
         
@@ -181,7 +207,7 @@ class CodingCrewNodes:
         formatted_prompt = prompt_template.format(
             user_input=ps.user_input,
             code=state.get("generated_code", ""),
-            execution_output=state.get("execution_stdout", "")
+            execution_output=state.get("execution_stdout", "")[:1000] # 截断
         )
         
         response = self.rotator.call_gemini_with_rotation(
@@ -191,6 +217,5 @@ class CodingCrewNodes:
             complexity="simple"
         )
         
-        # Update final report in project state
         ps.final_report = response
         return {"final_output": response, "project_state": ps}
