@@ -36,10 +36,17 @@ class CodingCrewNodes:
         
         if ps.file_context:
             fc = ps.file_context
-            # [Optimization] 上下文截断，防止 Token 爆炸
+            # [Optimization] 优化截断逻辑，基于行截断而不是字符硬截断，防止破坏代码结构
             content = fc.content
             if len(content) > 20000:
-                content = content[:10000] + "\n...[Content Truncated]...\n" + content[-10000:]
+                lines = content.splitlines()
+                # 保留头尾各 200 行
+                if len(lines) > 400:
+                    truncated_content = "\n".join(lines[:200]) + "\n\n...[Content Truncated by Gemini Swarm]...\n\n" + "\n".join(lines[-200:])
+                    content = truncated_content
+                else:
+                    # 如果行数不多但字符超长（比如一行极长），则按字符安全截断
+                    content = content[:10000] + "\n...[Content Truncated]...\n" + content[-10000:]
 
             file_ctx_str = f"""
 ### 📄 Current File Context (VS Code)
@@ -138,6 +145,97 @@ class CodingCrewNodes:
             user_input=ps.user_input,
             code=state.get("generated_code", ""),
             stdout=stdout,
+            stderr=stderr
+        )
+        
+        response = self.rotator.call_gemini_with_rotation(
+            model_name=GEMINI_MODEL_NAME,
+            contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
+            system_instruction="Strict JSON reviewer.",
+            complexity="complex"
+        )
+        
+        # [Critical Fix] 修复贪婪匹配导致的 JSON 解析失败
+        status = "reject"
+        feedback = "Parse Error"
+        report = {}
+        try:
+            # Old Greedy: r"(\{.*\})" 
+            # New Non-Greedy: r"(\{.*?\})" or find the last closed block
+            # 简单策略：非贪婪匹配第一个完整的 JSON 对象，或者尝试 rjson 等库
+            # 这里优化为：找到第一个 { 和最后一个 }
+            start = response.find("{")
+            end = response.rfind("}")
+            
+            if start != -1 and end != -1:
+                json_str = response[start:end+1]
+                # 清理可能的 markdown 代码块标记
+                json_str = json_str.replace("```json", "").replace("```", "")
+                
+                report = json.loads(json_str)
+                status = report.get("status", "reject").lower()
+                feedback = report.get("feedback", "")
+            else:
+                raise ValueError("No JSON found")
+
+        except Exception as e:
+            print(f"   ⚠️ Review JSON Parse Failed: {e}")
+            # Fallback strategy?
+            pass
+        
+        print(f"   📝 Review Status: {status.upper()}")
+        return {
+            "review_status": status,
+            "review_feedback": feedback,
+            "review_report": report
+        }
+
+    def reflector_node(self, state: CodingCrewState) -> Dict[str, Any]:
+        """[Reflector] Root Cause Analysis"""
+        print(f"🔧 [Reflector] Fixing strategy...")
+        ps = self._get_project_state(state)
+        
+        # [Optimization] 日志截断
+        stderr = state.get("execution_stderr", "None")
+        if len(stderr) > 2000: stderr = stderr[:2000] + "...(truncated)"
+
+        prompt_template = load_prompt(self.base_prompt_path, "reflection.md")
+        formatted_prompt = prompt_template.format(
+            user_input=ps.user_input,
+            code=state.get("generated_code", ""),
+            execution_stderr=stderr,
+            review_report=json.dumps(state.get("review_report", {}))
+        )
+        
+        response = self.rotator.call_gemini_with_rotation(
+            model_name=GEMINI_MODEL_NAME,
+            contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
+            system_instruction="Tech Lead Fixer.",
+            complexity="complex"
+        )
+        return {"reflection": response}
+
+    def summarizer_node(self, state: CodingCrewState) -> Dict[str, Any]:
+        """[Summarizer]"""
+        print(f"📝 [Summarizer] Finalizing...")
+        ps = self._get_project_state(state)
+        
+        prompt_template = load_prompt(self.base_prompt_path, "summarizer.md")
+        formatted_prompt = prompt_template.format(
+            user_input=ps.user_input,
+            code=state.get("generated_code", ""),
+            execution_output=state.get("execution_stdout", "")[:1000] # 截断
+        )
+        
+        response = self.rotator.call_gemini_with_rotation(
+            model_name=GEMINI_MODEL_NAME,
+            contents=[{"role": "user", "parts": [{"text": formatted_prompt}]}],
+            system_instruction="Summary.",
+            complexity="simple"
+        )
+        
+        ps.final_report = response
+        return {"final_output": response, "project_state": ps}
             stderr=stderr
         )
         
