@@ -61,6 +61,11 @@
         "command": "gemini-swarm.installDependencies",
         "title": "Gemini: Install Python Dependencies",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "gemini-swarm.undoLastChange",
+        "title": "Gemini: Undo Last AI Change",
+        "icon": "$(discard)"
       }
     ],
     "viewsContainers": {
