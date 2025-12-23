@@ -7,6 +7,9 @@ from typing import List, Dict, Any, Tuple
 
 logger = logging.getLogger("GeminiRotator")
 
+# [Concurrency Fix] 全局锁，防止多线程下 genai.configure 互相覆盖
+_GENAI_GLOBAL_LOCK = threading.Lock()
+
 class AllKeysExhaustedError(Exception):
     """Raised when all available API keys have been tried and failed."""
     pass
@@ -19,10 +22,11 @@ class GeminiKeyRotator:
         self.keys = keys
         self.current_index = 0
         self.base_url = base_url
-        self._lock = threading.Lock()
+        # 这是用于轮询 Key 索引的锁
+        self._index_lock = threading.Lock()
 
     def _get_next_key(self):
-        with self._lock:
+        with self._index_lock:
             key = self.keys[self.current_index]
             self.current_index = (self.current_index + 1) % len(self.keys)
         return key
@@ -37,7 +41,7 @@ class GeminiKeyRotator:
     ) -> Tuple[str, Dict[str, int]]:
         """
         调用 Gemini API 并自动轮询 Key。
-        不使用全局 configure，而是每次调用时配置。
+        [Concurrency Fix] 使用全局锁保护配置和生成过程。
         """
         if max_retries is None:
             max_retries = len(self.keys) * 2 # Allow 2 cycles
@@ -48,44 +52,40 @@ class GeminiKeyRotator:
         while retries < max_retries:
             key = self._get_next_key()
             try:
-                # [Refactor] Localize configuration per request if possible.
-                # Since SDK is global state based, we still have to use configure, 
-                # BUT we minimize the window and assume sequential execution within this function scope for the client creation.
-                # Actually, standard SDK creates a client. We can pass api_key to GenerativeModel? 
-                # No, GenerativeModel uses global config by default.
-                # Best practice is to assume single threaded or accept the race. 
-                # But here we will try to re-configure.
-                
-                genai.configure(api_key=key)
-                
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    system_instruction=system_instruction
-                )
-                
-                generation_config = genai.types.GenerationConfig(
-                    temperature=0.2 if complexity == "complex" else 0.1,
-                    max_output_tokens=8192
-                )
+                # [Concurrency Fix] 这是一个临界区。
+                # genai.configure 是全局状态，必须加锁，否则线程 A 配置完，线程 B 又改了配置。
+                # 虽然这会降低并发吞吐量，但保证了计费和配额的安全。
+                with _GENAI_GLOBAL_LOCK:
+                    genai.configure(api_key=key)
+                    
+                    model = genai.GenerativeModel(
+                        model_name=model_name,
+                        system_instruction=system_instruction
+                    )
+                    
+                    generation_config = genai.types.GenerationConfig(
+                        temperature=0.2 if complexity == "complex" else 0.1,
+                        max_output_tokens=8192
+                    )
 
-                response = model.generate_content(
-                    contents,
-                    generation_config=generation_config
-                )
-                
-                # Usage extraction
-                usage = {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0
-                }
-                
-                if hasattr(response, 'usage_metadata'):
-                    usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
-                    usage["completion_tokens"] = response.usage_metadata.candidates_token_count
-                    usage["total_tokens"] = response.usage_metadata.total_token_count
-                
-                return response.text, usage
+                    response = model.generate_content(
+                        contents,
+                        generation_config=generation_config
+                    )
+                    
+                    # Usage extraction
+                    usage = {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0
+                    }
+                    
+                    if hasattr(response, 'usage_metadata'):
+                        usage["prompt_tokens"] = response.usage_metadata.prompt_token_count
+                        usage["completion_tokens"] = response.usage_metadata.candidates_token_count
+                        usage["total_tokens"] = response.usage_metadata.total_token_count
+                    
+                    return response.text, usage
 
             except exceptions.ResourceExhausted:
                 logger.warning(f"Key {key[:8]}... exhausted. Rotating.")
