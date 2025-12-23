@@ -9,6 +9,7 @@ import time
 import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import re
 import uuid
 from typing import Dict, Any, List
@@ -32,27 +33,34 @@ from core.sandbox_manager import register_sandbox, unregister_sandbox # [OpenDev
 # --- Configuration ---
 PORT = int(os.getenv("PORT", 8000))
 HOST = os.getenv("HOST", "127.0.0.1")
-# [Configuration] 接收数据目录，由 VS Code 传入或使用默认
 SWARM_DATA_DIR = os.getenv("SWARM_DATA_DIR", os.path.join(os.path.expanduser("~"), ".gemini_swarm"))
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# --- Logging Setup ---
+# [Maintenance] Ensure logs are persisted for debugging
+os.makedirs(SWARM_DATA_DIR, exist_ok=True)
+log_file = os.path.join(SWARM_DATA_DIR, "gemini_swarm.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout), # Keep stdout for VS Code Output Channel
+        RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3) # 5MB file, keep 3 backups
+    ]
+)
 logger = logging.getLogger("vscode_backend")
 
 # [Startup Check] Ensure API Keys are present
 if not GEMINI_API_KEYS:
     logger.critical("❌ No Gemini API Keys found! Please configure 'geminiSwarm.apiKey' in VS Code settings.")
-    # Exit immediately if no keys, as the server is useless without them
     sys.exit(1)
 
 app = FastAPI(title="Gemini VS Code Engine", version="3.6.0")
 
 # [Security Fix] Restrict CORS
-# Webview requests often have 'null' origin or 'vscode-webview://'
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In local dev/extension environment, specific origin restriction can be tricky.
-                         # ideally restricted to "vscode-webview://" but let's keep * for local loopback only.
-                         # Since we bind to 127.0.0.1, external access is blocked.
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,7 +75,6 @@ except ValueError as e:
     sys.exit(1)
 
 # Init Shared Tools
-# [Fix] Pass data directory to tools
 embedding_key = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""
 memory = LocalRAGMemory(api_key=embedding_key, persist_dir=os.path.join(SWARM_DATA_DIR, "db_chroma"))
 search = GoogleSearchTool()
@@ -116,18 +123,13 @@ class EventStreamManager:
                 if tid in self.stream_timestamps:
                     del self.stream_timestamps[tid]
                 
-                # Cleanup Sandbox & Streams
                 unregister_sandbox(tid)
                 logger.info(f"🧹 Cleaned up stale stream & sandbox: {tid}")
 
 stream_manager = EventStreamManager()
 
-# --- Zombie Process Prevention (Suicide Pact) ---
+# --- Zombie Process Prevention ---
 def parent_monitor():
-    """
-    Monitor parent process. If parent dies (PPID changes or becomes 1), exit.
-    Also monitors stdin for EOF if possible, but PPID is more reliable cross-platform for simple spawn.
-    """
     ppid = os.getppid()
     logger.info(f"👀 Watching Parent PID: {ppid}")
     while True:
@@ -135,7 +137,7 @@ def parent_monitor():
             current_ppid = os.getppid()
             if current_ppid != ppid or current_ppid == 1:
                 logger.warning(f"💀 Parent process died (PPID changed from {ppid} to {current_ppid}). Exiting...")
-                os._exit(0) # Force exit
+                os._exit(0)
             time.sleep(5)
         except Exception as e:
             logger.error(f"Parent monitor error: {e}")
@@ -143,21 +145,14 @@ def parent_monitor():
 
 @app.on_event("startup")
 async def startup_event():
-    # Start stream cleanup
+    logger.info(f"🚀 Engine Starting. Data Dir: {SWARM_DATA_DIR}")
     asyncio.create_task(stream_manager.cleanup_stale_streams())
-    
-    # Start parent monitor daemon
     monitor_thread = threading.Thread(target=parent_monitor, daemon=True)
     monitor_thread.start()
 
 # --- Context Augmentation Helper ---
 async def augment_context_with_tools(user_input: str) -> str:
-    """
-    [Continue Logic] 解析 @Docs/@Codebase 等指令并注入上下文
-    """
     augmented_text = ""
-    
-    # 1. Handle @Docs (URL Scraping)
     docs_matches = re.findall(r"@Docs\s+(https?://[^\s]+)", user_input, re.IGNORECASE)
     if docs_matches:
         logger.info(f"🔍 Detected @Docs request for {len(docs_matches)} URLs")
@@ -166,9 +161,6 @@ async def augment_context_with_tools(user_input: str) -> str:
             content = browser.scrape_url(url)
             augmented_text += f"{content}\n\n"
         augmented_text += "----------------------------------------\n"
-    
-    # 2. @Codebase (RAG) is handled later via workspace_root context but can be enhanced here
-    
     return augmented_text
 
 # --- Background Runner ---
@@ -176,7 +168,6 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
     logger.info(f"🚀 [Engine] Task {task_id} Started.")
     await stream_manager.push_event(task_id, "status", {"msg": "Engine Started..."})
 
-    # [OpenDevin] Initialize Sandbox
     sb = StatefulSandbox(task_id)
     sb.start_session()
     register_sandbox(task_id, sb)
@@ -187,7 +178,6 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
             if 'project_state' in event:
                 ps: ProjectState = event['project_state']
                 
-                # 1. [Roo Code] Push Cost Update
                 if ps.cost_stats:
                     await stream_manager.push_event(task_id, "usage_update", {
                         "total_cost": ps.cost_stats.total_cost,
@@ -195,7 +185,6 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
                         "requests": ps.cost_stats.request_count
                     })
 
-                # 2. [Roo Code] Push Tool Call Proposal
                 if ps.artifacts and "pending_tool_call" in ps.artifacts:
                     tool_call = ps.artifacts.pop("pending_tool_call")
                     await stream_manager.push_event(task_id, "tool_proposal", {
@@ -203,7 +192,6 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
                         "params": tool_call["params"]
                     })
                 
-                # 3. [Legacy] Push Code Block
                 if ps.code_blocks:
                     latest_code = list(ps.code_blocks.values())[-1]
                     await stream_manager.push_event(task_id, "code_generated", {
@@ -211,7 +199,6 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
                         "node": "coding_crew"
                     })
                 
-                # 4. [OpenDevin] Push Images
                 if ps.artifacts and "image_artifacts" in ps.artifacts:
                     images = ps.artifacts["image_artifacts"]
                     await stream_manager.push_event(task_id, "image_generated", {
@@ -230,7 +217,6 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
     finally:
         await stream_manager.push_event(task_id, "finish", "done")
         await stream_manager.close_stream(task_id)
-        # Sandbox is auto-cleaned by stale stream manager
 
 # --- Endpoints ---
 
@@ -240,19 +226,15 @@ def health():
 
 @app.post("/api/start_task")
 async def start_task(req: TaskRequest, background_tasks: BackgroundTasks):
-    # [Fix] Use UUID for Task ID to prevent collision
     task_id = f"task_{uuid.uuid4().hex}"
     thread_id = req.thread_id or f"thread_{task_id}"
     
-    # [Continue Upgrade] Pre-process User Input for Context
     additional_context = await augment_context_with_tools(req.user_input)
     final_input = req.user_input + additional_context
     
-    # [Continue] Trigger RAG Indexing if needed
     if "@Codebase" in req.user_input and req.workspace_root:
         background_tasks.add_task(indexer.index_workspace, req.workspace_root)
 
-    # Init State
     ps = ProjectState.init_from_task(
         user_input=final_input,
         task_id=task_id, 
