@@ -1,7 +1,6 @@
 import os
-import uuid
-from typing import List, Tuple
 import logging
+from typing import List
 
 logger = logging.getLogger("RAG-Indexer")
 
@@ -12,8 +11,8 @@ class WorkspaceIndexer:
     def __init__(self, memory_tool):
         self.memory = memory_tool
         # 忽略列表
-        self.ignore_dirs = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.vscode', 'venv', 'env', '.idea'}
-        self.ignore_exts = {'.png', '.jpg', '.jpeg', '.gif', '.ico', '.pyc', '.lock', '.pdf', '.svg'}
+        self.ignore_dirs = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.vscode', 'venv', 'env', '.idea', '__MACOSX'}
+        self.ignore_exts = {'.png', '.jpg', '.jpeg', '.gif', '.ico', '.pyc', '.lock', '.pdf', '.svg', '.exe', '.dll'}
 
     def index_workspace(self, root_path: str):
         """全量索引 (建议在后台运行)"""
@@ -43,9 +42,8 @@ class WorkspaceIndexer:
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
                         
-                    # 简单的切片逻辑 (按 1000 字符切分)
-                    # 生产环境建议用 RecursiveCharacterTextSplitter
-                    chunks = self._chunk_text(content, chunk_size=1000, overlap=100)
+                    # [Optimization] 更智能的切片逻辑
+                    chunks = self._chunk_text_smart(content, chunk_size=1000, overlap=100)
                     
                     for i, chunk in enumerate(chunks):
                         docs.append(chunk)
@@ -53,11 +51,10 @@ class WorkspaceIndexer:
                         ids.append(f"{rel_path}_{i}")
                         
                 except Exception as e:
-                    pass # Ignore read errors
+                    pass 
 
         # 批量存入
         if docs:
-            # 每次存 50 个防止请求过大
             batch_size = 50
             for i in range(0, len(docs), batch_size):
                 end = i + batch_size
@@ -65,14 +62,37 @@ class WorkspaceIndexer:
             
             logger.info(f"✅ Indexed {len(docs)} chunks from workspace.")
 
-    def _chunk_text(self, text: str, chunk_size: int, overlap: int) -> List[str]:
+    def _chunk_text_smart(self, text: str, chunk_size: int, overlap: int) -> List[str]:
+        """
+        [Optimization] 基于换行的智能切分，避免切断代码行
+        """
         chunks = []
-        start = 0
-        text_len = len(text)
+        lines = text.splitlines(keepends=True)
+        current_chunk = []
+        current_length = 0
         
-        while start < text_len:
-            end = start + chunk_size
-            chunks.append(text[start:end])
-            start += chunk_size - overlap
+        for line in lines:
+            if current_length + len(line) > chunk_size and current_chunk:
+                # 当前块满了，保存
+                full_chunk = "".join(current_chunk)
+                chunks.append(full_chunk)
+                
+                # 处理 Overlap: 保留末尾几行作为下一块的开头
+                overlap_buffer = []
+                overlap_len = 0
+                for prev_line in reversed(current_chunk):
+                    if overlap_len + len(prev_line) > overlap:
+                        break
+                    overlap_buffer.insert(0, prev_line)
+                    overlap_len += len(prev_line)
+                
+                current_chunk = overlap_buffer
+                current_length = overlap_len
+            
+            current_chunk.append(line)
+            current_length += len(line)
+        
+        if current_chunk:
+            chunks.append("".join(current_chunk))
             
         return chunks
