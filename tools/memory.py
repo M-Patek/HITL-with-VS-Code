@@ -4,31 +4,47 @@ import chromadb
 from chromadb.utils import embedding_functions
 from typing import List, Optional, Dict, Any
 import google.generativeai as genai
+import threading
 
 # 配置 Logger
 logger = logging.getLogger("Tools-LocalRAG")
+
+# [Concurrency Fix] 本地锁，用于保护 Embedding 时的全局配置
+_EMBED_LOCK = threading.Lock()
 
 class GeminiEmbeddingFunction(chromadb.EmbeddingFunction):
     """
     使用 Google Gemini API 生成 Embeddings 的适配器
     """
     def __init__(self, api_key: str):
-        genai.configure(api_key=api_key)
+        # [Concurrency Fix] 不要在 init 时配置全局 key，这会在多线程环境下被覆盖
+        self.api_key = api_key
 
     def __call__(self, input: chromadb.Documents) -> chromadb.Embeddings:
         model = 'models/text-embedding-004'
         embeddings = []
-        for text in input:
+        
+        # [Concurrency Fix] 加锁执行配置和请求
+        with _EMBED_LOCK:
             try:
-                result = genai.embed_content(
-                    model=model,
-                    content=text,
-                    task_type="retrieval_document"
-                )
-                embeddings.append(result['embedding'])
+                # 每次调用前配置 Key
+                genai.configure(api_key=self.api_key)
+                
+                for text in input:
+                    try:
+                        result = genai.embed_content(
+                            model=model,
+                            content=text,
+                            task_type="retrieval_document"
+                        )
+                        embeddings.append(result['embedding'])
+                    except Exception as e:
+                        logger.error(f"Embedding failed: {e}")
+                        embeddings.append([0.0] * 768) 
             except Exception as e:
-                logger.error(f"Embedding failed: {e}")
-                embeddings.append([0.0] * 768) 
+                logger.error(f"Global configuration failed: {e}")
+                return [[0.0] * 768] * len(input)
+
         return embeddings
 
 class LocalRAGMemory:
@@ -37,7 +53,6 @@ class LocalRAGMemory:
     """
     def __init__(self, api_key: str, persist_dir: Optional[str] = None):
         # [Security Fix] 优先使用环境变量传入的绝对路径，防止在插件目录创建数据
-        # 如果未传入，回退到用户的主目录下的 .gemini_swarm 文件夹，而不是 CWD
         if not persist_dir:
             persist_dir = os.getenv("SWARM_DATA_DIR")
         
