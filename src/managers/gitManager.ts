@@ -63,6 +63,15 @@ export class GitManager {
     }
 
     /**
+     * [Security Fix] 获取最后一次提交的信息，用于安全回滚检查
+     */
+    public async getLastCommitMessage(): Promise<string> {
+        if (!await this.isGitRepo()) return "";
+        // git log -1 --pretty=%B
+        return await this.exec(['log', '-1', '--pretty=%B']);
+    }
+
+    /**
      * [Aider Soul] 创建修改前的“后悔药” (Auto-Commit)
      */
     public async createCheckpoint(message: string = "Gemini Swarm: Auto-Checkpoint"): Promise<boolean> {
@@ -94,14 +103,8 @@ export class GitManager {
             vscode.window.showErrorMessage('Not a git repository!');
             return;
         }
-
-        const selection = await vscode.window.showWarningMessage(
-            "⚠️ Undo last commit? This will perform 'git reset --hard HEAD~1'. All changes in the last commit will be lost.",
-            "Yes, Undo", "Cancel"
-        );
-
-        if (selection !== "Yes, Undo") return;
-
+        
+        // [Safety Note] Logic moved to ActionManager for UI interaction check
         await this.exec(['reset', '--hard', 'HEAD~1']);
         vscode.window.showInformationMessage('⏪ Changes Reverted (Time Travel Successful)');
     }
