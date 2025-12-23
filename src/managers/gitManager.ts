@@ -13,99 +13,77 @@ export class GitManager {
         }
     }
 
-    /**
-     * [Security Fix] 使用 spawn 替代 exec 以防止 Shell 注入
-     * 参数必须作为数组传递，严禁字符串拼接
-     */
     private async exec(args: string[]): Promise<string> {
         if (!this.rootPath) return "";
-        
         return new Promise((resolve, reject) => {
-            // 使用 spawn，shell: false (默认)
             const gitProcess = cp.spawn('git', args, { 
                 cwd: this.rootPath,
-                env: process.env // 传递环境变量
+                env: process.env 
             });
-
             let stdout = '';
             let stderr = '';
-
-            gitProcess.stdout.on('data', (data) => {
-                stdout += data.toString();
-            });
-
-            gitProcess.stderr.on('data', (data) => {
-                stderr += data.toString();
-            });
-
-            gitProcess.on('error', (err) => {
-                this.outputChannel.appendLine(`[Git Error] Spawn failed: ${err.message}`);
-                resolve(""); // 保持原有的非阻塞行为
-            });
-
+            gitProcess.stdout.on('data', (d) => stdout += d.toString());
+            gitProcess.stderr.on('data', (d) => stderr += d.toString());
             gitProcess.on('close', (code) => {
-                if (code !== 0) {
-                    this.outputChannel.appendLine(`[Git Error] Process exited with code ${code}: ${stderr}`);
-                    resolve("");
-                } else {
-                    resolve(stdout.trim());
-                }
+                if (code !== 0) resolve(""); 
+                else resolve(stdout.trim());
             });
         });
     }
 
-    /**
-     * 检查当前是否在 Git 仓库中
-     */
     public async isGitRepo(): Promise<boolean> {
         const result = await this.exec(['rev-parse', '--is-inside-work-tree']);
         return result === 'true';
     }
 
-    /**
-     * [Security Fix] 获取最后一次提交的信息，用于安全回滚检查
-     */
     public async getLastCommitMessage(): Promise<string> {
         if (!await this.isGitRepo()) return "";
-        // git log -1 --pretty=%B
         return await this.exec(['log', '-1', '--pretty=%B']);
     }
 
-    /**
-     * [Aider Soul] 创建修改前的“后悔药” (Auto-Commit)
-     */
     public async createCheckpoint(message: string = "Gemini Swarm: Auto-Checkpoint"): Promise<boolean> {
         if (!await this.isGitRepo()) return false;
-
-        // 1. 检查是否有未提交的更改
         const status = await this.exec(['status', '--porcelain']);
-        if (!status) {
-            return true;
-        }
+        if (!status) return true;
 
         this.outputChannel.appendLine(`[Checkpoint] Saving dirty state...`);
-        
-        // 2. 添加所有更改
         await this.exec(['add', '.']);
-        
-        // 3. 提交 (参数分离，防止注入)
         await this.exec(['commit', '-m', message]);
-        
         vscode.window.setStatusBarMessage('$(git-commit) Gemini Checkpoint Created', 3000);
         return true;
     }
 
-    /**
-     * [Undo] 回滚上一次提交
-     */
     public async undoLastCommit() {
         if (!await this.isGitRepo()) {
             vscode.window.showErrorMessage('Not a git repository!');
             return;
         }
-        
-        // [Safety Note] Logic moved to ActionManager for UI interaction check
         await this.exec(['reset', '--hard', 'HEAD~1']);
-        vscode.window.showInformationMessage('⏪ Changes Reverted (Time Travel Successful)');
+        vscode.window.showInformationMessage('⏪ Changes Reverted');
+    }
+
+    /**
+     * [Phase 3 Upgrade] Semantic Commit
+     */
+    public async doSemanticCommit(message: string) {
+        if (!await this.isGitRepo()) {
+            vscode.window.showErrorMessage("Cannot commit: Not a git repository.");
+            return;
+        }
+
+        const status = await this.exec(['status', '--porcelain']);
+        if (!status) {
+            vscode.window.showInformationMessage("Nothing to commit.");
+            return;
+        }
+
+        // Add all changes
+        await this.exec(['add', '.']);
+        
+        // Commit with the AI generated message
+        await this.exec(['commit', '-m', message]);
+        
+        vscode.window.showInformationMessage(`✅ Semantic Commit: ${message}`);
+        this.outputChannel.appendLine(`[Semantic Commit] ${message}`);
     }
 }
