@@ -4,7 +4,6 @@ import { ChatViewProvider } from './views/chatProvider';
 import { GeminiQuickFixProvider } from './providers/quickFixProvider';
 import { SecurityManager } from './managers/securityManager';
 import { DependencyManager } from './managers/dependencyManager';
-// [New]
 import { ActionManager } from './managers/actionManager';
 
 let processManager: ProcessManager;
@@ -16,12 +15,8 @@ export async function activate(context: vscode.ExtensionContext) {
     const securityManager = new SecurityManager();
     const dependencyManager = new DependencyManager();
     const chatProvider = new ChatViewProvider(context.extensionUri);
-    // [New] 单独实例化 ActionManager 以便命令调用
-    const actionManager = new ActionManager(); 
-    // 注意：ChatViewProvider 内部也有一个 ActionManager，为了状态一致性，
-    // 理想情况下应该共享同一个实例，或者将 ActionManager 设为单例。
-    // 这里为了简单，我们让 ChatViewProvider 使用它自己的，而 Undo 命令使用这里的。
-    // 由于 Git 操作是针对磁盘的，多实例并不影响逻辑。
+    // [Fix] Use Singleton
+    const actionManager = ActionManager.getInstance();
 
     securityManager.checkDockerAvailability();
 
@@ -66,7 +61,6 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // [Aider Soul] 注册撤销命令
     context.subscriptions.push(
         vscode.commands.registerCommand('gemini-swarm.undoLastChange', () => {
             actionManager.undoLastChange();
