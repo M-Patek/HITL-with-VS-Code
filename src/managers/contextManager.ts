@@ -11,6 +11,15 @@ export interface FileContext {
 
 export class ContextManager {
     
+    // [Privacy Fix] Filter sensitive files
+    private isSensitiveFile(filename: string): boolean {
+        const lower = filename.toLowerCase();
+        if (lower.endsWith('.env') || lower.includes('credentials') || lower.includes('secret') || lower.includes('id_rsa')) {
+            return true;
+        }
+        return false;
+    }
+
     public getActiveFileContext(): FileContext | null {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
@@ -18,15 +27,32 @@ export class ContextManager {
         }
 
         const document = editor.document;
+        const filename = vscode.workspace.asRelativePath(document.fileName);
+
+        // [Privacy Fix] Redact sensitive files
+        if (this.isSensitiveFile(filename)) {
+            return {
+                filename: filename,
+                content: "[REDACTED - SENSITIVE FILE]",
+                selection: "",
+                cursor_line: 0,
+                language_id: document.languageId
+            };
+        }
+
+        // [Performance Fix] Hard limit on size (e.g., 100KB)
+        const rawText = document.getText();
+        let content = rawText;
+        if (rawText.length > 100 * 1024) {
+            content = rawText.substring(0, 100 * 1024) + "\n\n[...TRUNCATED BY SYSTEM DUE TO SIZE...]";
+        }
+
         const selection = editor.selection;
         const cursorPosition = selection.active;
 
-        // [Optimization] 使用相对路径解决文件名歧义
-        const filename = vscode.workspace.asRelativePath(document.fileName);
-
         return {
             filename: filename,
-            content: document.getText(),
+            content: content,
             selection: document.getText(selection), 
             cursor_line: cursorPosition.line + 1,
             language_id: document.languageId
@@ -55,11 +81,14 @@ export class ContextManager {
             return "No workspace folder open.";
         }
 
-        const excludePattern = '**/{node_modules,.git,dist,out,build,.vscode,__pycache__}/**';
-        const uris = await vscode.workspace.findFiles('**/*', excludePattern, 50);
+        const excludePattern = '**/{node_modules,.git,dist,out,build,.vscode,__pycache__,venv,env,.env}/**';
+        const uris = await vscode.workspace.findFiles('**/*', excludePattern, 200); // Increased limit slightly
 
         const filePaths = uris.map(uri => vscode.workspace.asRelativePath(uri));
-        return filePaths.join('\n');
+        // [Privacy Fix] Double check list for sensitive files
+        const cleanPaths = filePaths.filter(p => !this.isSensitiveFile(p));
+        
+        return cleanPaths.join('\n');
     }
 
     public async collectFullContext(): Promise<any> {
