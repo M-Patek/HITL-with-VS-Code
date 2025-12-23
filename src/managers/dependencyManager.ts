@@ -13,7 +13,7 @@ export class DependencyManager {
     public async installDependencies(context: vscode.ExtensionContext) {
         const config = vscode.workspace.getConfiguration('geminiSwarm');
         
-        // [Optimization] 智能推断 Python 命令，防止 Linux/Mac 上 python2 的问题
+        // [Optimization] 智能推断 Python 命令
         const defaultPython = process.platform === 'win32' ? 'python' : 'python3';
         const pythonPath = config.get<string>('pythonPath') || defaultPython;
         
@@ -40,7 +40,11 @@ export class DependencyManager {
             cancellable: false
         }, async (progress) => {
             return new Promise<void>((resolve, reject) => {
-                const installProcess = cp.spawn(pythonPath, ['-m', 'pip', 'install', '-r', 'requirements.txt'], {
+                // [Optimization] 使用 --user 标志，避免权限问题和污染全局环境
+                // 更好的做法是创建 venv，但作为插件简化处理，--user 是折衷方案
+                const args = ['-m', 'pip', 'install', '--user', '-r', 'requirements.txt'];
+                
+                const installProcess = cp.spawn(pythonPath, args, {
                     cwd: backendPath
                 });
 
