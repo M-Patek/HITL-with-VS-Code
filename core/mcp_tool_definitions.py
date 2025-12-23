@@ -48,7 +48,7 @@ class MCPToolRegistry:
     def parse_tool_call(llm_response: str) -> dict:
         """
         解析 LLM 输出中的 XML 工具调用
-        [Security Fix] 增强正则鲁棒性，防止解析失败
+        [Robustness Fix] 使用字符串查找而非正则来提取 content，防止代码内容中包含 XML 标签导致截断
         """
         try:
             # 1. 尝试提取最外层 <tool_code>
@@ -76,15 +76,31 @@ class MCPToolRegistry:
             if tool_name == "write_to_file":
                 # 提取 path
                 path_match = re.search(r"<path>\s*(.*?)\s*</path>", params_xml, re.DOTALL | re.IGNORECASE)
-                # 提取 content (内容可能包含各种字符，必须谨慎)
-                content_match = re.search(r"<content>\s*(.*?)\s*</content>", params_xml, re.DOTALL | re.IGNORECASE)
                 
-                if path_match and content_match:
+                # [Fix] 提取 content
+                # 不要使用正则 (.*?)，因为它遇到第一个 </content> 就会停止。
+                # 如果代码里包含 XML 字符串，就会被截断。
+                # 使用 find 和 rfind 来截取首尾标签之间的所有内容。
+                start_tag = "<content>"
+                end_tag = "</content>"
+                
+                start_idx = params_xml.find(start_tag)
+                end_idx = params_xml.rfind(end_tag)
+                
+                content_str = ""
+                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                    # 提取 content 标签中间的内容
+                    content_str = params_xml[start_idx + len(start_tag) : end_idx]
+                
+                if path_match:
                     params["path"] = path_match.group(1).strip()
+                    
                     # 去除首尾的 CDATA 标记（如果模型生成了）
-                    raw_content = content_match.group(1)
-                    if raw_content.startswith("<![CDATA[") and raw_content.endswith("]]>"):
-                        raw_content = raw_content[9:-3]
+                    raw_content = content_str
+                    if raw_content.strip().startswith("<![CDATA[") and raw_content.strip().endswith("]]>"):
+                         # 这里需要小心处理空白字符
+                         raw_content = raw_content.strip()[9:-3]
+                    
                     params["content"] = raw_content.strip()
             
             elif tool_name == "execute_command":
