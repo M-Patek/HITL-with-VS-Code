@@ -75,12 +75,21 @@ class RepositoryMapper:
     def _parse_file(self, file_path: str, rel_path: str, lang_name: str) -> Optional[str]:
         """解析文件生成骨架"""
         try:
+            # [Performance Fix] 检查文件大小，跳过超过 1MB 的大文件
+            file_size = os.path.getsize(file_path)
+            if file_size > 1024 * 1024: # 1MB Limit
+                return f"{rel_path}:\n  (Skipped: File too large > 1MB)"
+
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 code = f.read()
             
             if not code.strip():
                 return None
-
+            
+            # [Performance Fix] 即使文件小于 1MB，如果行数过多（如压缩代码），解析也会极慢
+            # 简单启发式：如果前 100 个字符包含大量不可见字符或单行极长，可能需要跳过
+            # 这里暂时只做 Tree-sitter 解析保护
+            
             language = get_language(lang_name)
             parser = get_parser(lang_name)
             tree = parser.parse(bytes(code, "utf8"))
