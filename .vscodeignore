@@ -1,0 +1,13 @@
+.vscode/**
+.vscode-test/**
+src/**
+.gitignore
+vsc-extension-quickstart.md
+webpack.config.js
+scripts/**
+/.map
+**/.ts
+node_modules/
+!dist/**
+!media/**
+!python_backend/**
