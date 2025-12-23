@@ -26,6 +26,28 @@ export class ActionManager {
         }
     }
 
+    /**
+     * [Security Fix] 验证路径是否在工作区内，防止路径遍历攻击
+     */
+    private validatePath(relativePath: string): string | null {
+        if (!vscode.workspace.workspaceFolders) return null;
+
+        const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
+        // 使用 path.resolve 处理 '..'
+        const fullPath = path.resolve(rootPath, relativePath);
+        
+        // 确保解析后的绝对路径以 rootPath 开头
+        // 注意：Windows 上路径不区分大小写，这里进行简单的大小写不敏感检查更安全，
+        // 或者直接依赖 path.relative 检查是否以 '..' 开头
+        const relative = path.relative(rootPath, fullPath);
+        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+            vscode.window.showErrorMessage(`❌ Security Alert: Illegal path access detected! (${relativePath})`);
+            return null;
+        }
+
+        return fullPath;
+    }
+
     public async insertCode(editor: vscode.TextEditor, code: string) {
         await this.ensureCheckpoint('Insert Code');
         await editor.edit(editBuilder => {
@@ -38,29 +60,18 @@ export class ActionManager {
     }
 
     public async previewFileDiff(relativePath: string, newContent: string) {
-        if (!vscode.workspace.workspaceFolders) {
-            vscode.window.showErrorMessage('No workspace open for diff!');
-            return;
-        }
-
-        const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-        const targetPath = path.join(rootPath, relativePath);
-        
-        // [Security] Path Traversal Check
-        if (!targetPath.startsWith(rootPath)) {
-            vscode.window.showErrorMessage('❌ Security Alert: Illegal path access detected!');
-            return;
-        }
+        const fullPath = this.validatePath(relativePath);
+        if (!fullPath) return;
 
         const fileName = path.basename(relativePath);
         const tempNewUri = vscode.Uri.file(path.join(os.tmpdir(), `gemini_new_${Date.now()}_${fileName}`));
         await fs.promises.writeFile(tempNewUri.fsPath, newContent);
 
-        let leftUri = vscode.Uri.file(targetPath);
+        let leftUri = vscode.Uri.file(fullPath);
         let title = `${fileName} (Current) ↔ (Gemini Proposal)`;
 
         try {
-            await fs.promises.access(targetPath);
+            await fs.promises.access(fullPath);
         } catch {
             const tempEmptyUri = vscode.Uri.file(path.join(os.tmpdir(), `gemini_empty_${Date.now()}_${fileName}`));
             await fs.promises.writeFile(tempEmptyUri.fsPath, "");
@@ -98,19 +109,8 @@ export class ActionManager {
     }
 
     public async applyFileChange(relativePath: string, content: string) {
-        if (!vscode.workspace.workspaceFolders) {
-            vscode.window.showErrorMessage('No workspace open!');
-            return;
-        }
-
-        const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-        const fullPath = path.join(rootPath, relativePath);
-
-        // [Security] Path Traversal Check
-        if (!fullPath.startsWith(rootPath)) {
-            vscode.window.showErrorMessage('❌ Security Alert: Illegal path access detected!');
-            return;
-        }
+        const fullPath = this.validatePath(relativePath);
+        if (!fullPath) return;
 
         await this.ensureCheckpoint(`Update ${relativePath}`);
 
