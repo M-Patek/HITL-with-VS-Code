@@ -12,6 +12,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import re
 import uuid
+import psutil 
 from typing import Dict, Any, List
 
 # [Dependencies]
@@ -23,12 +24,12 @@ from langgraph.checkpoint.memory import MemorySaver
 from core.models import ProjectState
 
 # [Tools]
-from tools.memory import LocalRAGMemory        # [Continue]
+from tools.memory import LocalRAGMemory        
 from tools.search import GoogleSearchTool
-from tools.browser import WebLoader            # [Continue]
-from core.rag_indexer import WorkspaceIndexer  # [Continue]
-from tools.sandbox import StatefulSandbox      # [OpenDevin]
-from core.sandbox_manager import register_sandbox, unregister_sandbox # [OpenDevin]
+from tools.browser import WebLoader            
+from core.rag_indexer import WorkspaceIndexer  
+from tools.sandbox import StatefulSandbox      
+from core.sandbox_manager import register_sandbox, unregister_sandbox 
 
 # --- Configuration ---
 PORT = int(os.getenv("PORT", 8000))
@@ -36,7 +37,6 @@ HOST = os.getenv("HOST", "127.0.0.1")
 SWARM_DATA_DIR = os.getenv("SWARM_DATA_DIR", os.path.join(os.path.expanduser("~"), ".gemini_swarm"))
 
 # --- Logging Setup ---
-# [Maintenance] Ensure logs are persisted for debugging
 os.makedirs(SWARM_DATA_DIR, exist_ok=True)
 log_file = os.path.join(SWARM_DATA_DIR, "gemini_swarm.log")
 
@@ -44,23 +44,21 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout), # Keep stdout for VS Code Output Channel
-        RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3) # 5MB file, keep 3 backups
+        logging.StreamHandler(sys.stdout), 
+        RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3) 
     ]
 )
 logger = logging.getLogger("vscode_backend")
 
-# [Startup Check] Ensure API Keys are present
 if not GEMINI_API_KEYS:
     logger.critical("❌ No Gemini API Keys found! Please configure 'geminiSwarm.apiKey' in VS Code settings.")
     sys.exit(1)
 
 app = FastAPI(title="Gemini VS Code Engine", version="3.6.0")
 
-# [Security Fix] Restrict CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["http://localhost", "[http://127.0.0.1](http://127.0.0.1)", "vscode-webview://*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,12 +67,11 @@ app.add_middleware(
 # --- Components ---
 checkpointer = MemorySaver()
 try:
-    rotator = GeminiKeyRotator("https://generativelanguage.googleapis.com", GEMINI_API_KEYS)
+    rotator = GeminiKeyRotator("[https://generativelanguage.googleapis.com](https://generativelanguage.googleapis.com)", GEMINI_API_KEYS)
 except ValueError as e:
     logger.critical(f"❌ Key Rotator Init Failed: {e}")
     sys.exit(1)
 
-# Init Shared Tools
 embedding_key = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""
 memory = LocalRAGMemory(api_key=embedding_key, persist_dir=os.path.join(SWARM_DATA_DIR, "db_chroma"))
 search = GoogleSearchTool()
@@ -134,11 +131,19 @@ def parent_monitor():
     logger.info(f"👀 Watching Parent PID: {ppid}")
     while True:
         try:
-            current_ppid = os.getppid()
-            if current_ppid != ppid or current_ppid == 1:
-                logger.warning(f"💀 Parent process died (PPID changed from {ppid} to {current_ppid}). Exiting...")
+            if not psutil.pid_exists(ppid):
+                logger.warning(f"💀 Parent process {ppid} not found. Exiting...")
                 os._exit(0)
+            
+            parent = psutil.Process(ppid)
+            if parent.status() == psutil.STATUS_ZOMBIE or parent.status() == psutil.STATUS_DEAD:
+                 logger.warning(f"💀 Parent process {ppid} is dead/zombie. Exiting...")
+                 os._exit(0)
+
             time.sleep(5)
+        except psutil.NoSuchProcess:
+            logger.warning(f"💀 Parent process {ppid} vanished. Exiting...")
+            os._exit(0)
         except Exception as e:
             logger.error(f"Parent monitor error: {e}")
             break
@@ -168,10 +173,11 @@ async def run_workflow_background(task_id: str, initial_input: Dict, config: Dic
     logger.info(f"🚀 [Engine] Task {task_id} Started.")
     await stream_manager.push_event(task_id, "status", {"msg": "Engine Started..."})
 
-    sb = StatefulSandbox(task_id)
+    # [Sandbox Fix] 传入 workspace_root 以挂载目录
+    sb = StatefulSandbox(task_id, workspace_root=workspace_root)
     sb.start_session()
     register_sandbox(task_id, sb)
-    logger.info(f"📦 Sandbox {task_id} ready.")
+    logger.info(f"📦 Sandbox {task_id} ready. Root: {workspace_root}")
 
     try:
         async for event in workflow_app.astream(initial_input, config=config, stream_mode="values"):
@@ -246,34 +252,4 @@ async def start_task(req: TaskRequest, background_tasks: BackgroundTasks):
     config = {"configurable": {"thread_id": thread_id}}
     
     await stream_manager.create_stream(task_id)
-    background_tasks.add_task(run_workflow_background, task_id, initial_input, config, req.workspace_root)
-    
-    return {"task_id": task_id, "thread_id": thread_id}
-
-@app.get("/api/stream/{task_id}")
-async def stream_events(task_id: str, request: Request):
-    async def event_generator():
-        queue = stream_manager.active_streams.get(task_id)
-        if not queue:
-            yield f"event: error\ndata: \"Stream not found\"\n\n"
-            yield f"event: finish\ndata: end\n\n"
-            return
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
-                if payload is None:
-                    yield f"event: finish\ndata: end\n\n"
-                    break
-                yield f"event: {payload['type']}\ndata: {json.dumps(payload['data'])}\n\n"
-        except: pass
-            
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-if __name__ == "__main__":
-    print(f"🔥 Gemini VS Code Engine (Ultimate) starting on port {PORT}...")
-    uvicorn.run(app, host=HOST, port=PORT)
+    background_tasks.add_task(run_workflow_background, task_
