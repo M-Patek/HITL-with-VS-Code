@@ -13,7 +13,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         private readonly _extensionUri: vscode.Uri,
     ) { 
         this._contextManager = new ContextManager();
-        this._actionManager = new ActionManager();
+        // [Fix] Use Singleton
+        this._actionManager = ActionManager.getInstance();
     }
 
     public resolveWebviewView(
@@ -22,12 +23,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken,
     ) {
         this._view = webviewView;
-
         webviewView.webview.options = {
             enableScripts: true,
             localResourceRoots: [this._extensionUri]
         };
-
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
@@ -46,8 +45,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     const editor = vscode.window.activeTextEditor;
                     if (editor) {
                         await this._actionManager.insertCode(editor, data.code);
-                    } else {
-                        vscode.window.showErrorMessage('❌ No active editor found!');
                     }
                     break;
                 }
@@ -59,12 +56,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     await this._actionManager.applyFileChange(data.path, data.content);
                     break;
                 }
-                case 'view_diff': { // [Roo Code] Handle Diff Request
+                case 'view_diff': {
                     await this._actionManager.previewFileDiff(data.path, data.content);
-                    break;
-                }
-                case 'onInfo': {
-                    vscode.window.showInformationMessage(data.value);
                     break;
                 }
             }
@@ -90,52 +83,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private async handleGetContext() {
         try {
             const contextData = await this._contextManager.collectFullContext();
-            
             let workspaceRoot = "";
             if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
                 workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
             }
-
             this.sendToWebview('context_response', {
                 ...contextData,
                 workspace_root: workspaceRoot
             });
-
         } catch (error: any) {
-            console.error('Context collection failed:', error);
             this.sendToWebview('context_response', { 
-                file_context: null, 
-                project_structure: "", 
-                diagnostics: "",
-                workspace_root: "" 
+                file_context: null, project_structure: "", diagnostics: "", workspace_root: "" 
             });
         }
     }
 
     private _getHtmlForWebview(webview: vscode.Webview) {
+        // ... (Keep existing HTML generation code unchanged as it refers to external main.js)
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'main.js'));
         const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'styles.css'));
-        
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'unsafe-eval' https://unpkg.com; connect-src 'self' http://127.0.0.1:*;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'unsafe-eval' [https://unpkg.com](https://unpkg.com); connect-src 'self' [http://127.0.0.1](http://127.0.0.1):*;">
     <link href="${stylesUri}" rel="stylesheet">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="[https://unpkg.com/vue@3/dist/vue.global.prod.js](https://unpkg.com/vue@3/dist/vue.global.prod.js)"></script>
     <title>Gemini Swarm</title>
 </head>
 <body>
     <div id="app">
+        <!-- Vue App Content -->
         <div id="chat-container" ref="chatContainer">
             <div v-if="messages.length === 0" class="message system">
-                🐱 <b>Gemini Swarm Engine (Roo Code Style)</b><br>
+                🐱 <b>Gemini Swarm Engine</b><br>
                 <span>Ready to Code.</span>
             </div>
             
             <div v-for="(msg, idx) in messages" :key="idx" :class="['message', msg.role]">
-                
                 <div v-if="msg.type !== 'code' && msg.type !== 'tool_proposal'">{{ msg.content }}</div>
 
                 <div v-else-if="msg.type === 'code'" class="artifact-card">
@@ -148,7 +134,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     <div class="artifact-content">{{ msg.content }}</div>
                 </div>
 
-                <!-- Tool Proposal Card -->
                 <div v-else-if="msg.type === 'tool_proposal'" class="artifact-card tool-card">
                     <div class="artifact-header tool-header">
                         <span>🛠️ {{ msg.label }}</span>
@@ -156,7 +141,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     <div class="artifact-content">
                         <div v-if="msg.content.tool === 'write_to_file'">
                             <strong>Path:</strong> {{ msg.content.params.path }}<br>
-                            <pre class="code-preview">{{ msg.content.params.content.slice(0, 150) }}...</pre>
                         </div>
                         <div v-if="msg.content.tool === 'execute_command'">
                             <strong>Command:</strong> <code>{{ msg.content.params.command }}</code>
@@ -164,11 +148,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     </div>
                     
                     <div class="tool-actions" v-if="!msg.approved && !msg.rejected">
-                        <!-- [Roo Code] View Diff Button -->
                         <button v-if="msg.content.tool === 'write_to_file'" class="diff-btn" @click="viewDiff(msg.content)">
                             👀 View Diff
                         </button>
-                        
                         <button class="approve-btn" @click="approveTool(idx, msg.content)">
                             ✅ Approve
                         </button>
@@ -176,15 +158,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                             ❌ Reject
                         </button>
                     </div>
-                    
-                    <div class="tool-status" v-if="msg.approved">
-                        ✅ Approved & Executed
-                    </div>
-                    <div class="tool-status" v-if="msg.rejected">
-                        ❌ Rejected
-                    </div>
+                    <div class="tool-status" v-if="msg.approved">✅ Approved & Executed</div>
+                    <div class="tool-status" v-if="msg.rejected">❌ Rejected</div>
                 </div>
-
             </div>
 
             <div v-if="isProcessing" class="message system">
